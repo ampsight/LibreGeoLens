@@ -3,3 +3,4 @@ boto3==1.35.91
 groq==0.13.1
 markdown==3.7
 rasterio==1.4.3
+gemma==3.1.0
