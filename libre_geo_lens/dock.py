@@ -10,6 +10,7 @@ import shutil
 import datetime
 from openai import OpenAI
 from groq import Groq
+from google import genai
 import boto3
 import tempfile
 import ntpath
@@ -252,6 +253,10 @@ class LibreGeoLensDockWidget(QDockWidget):
                 "limits": {
                     "image_mb": 4
                 }
+            },
+            "Gemma": {
+                "class": genai,
+                "models": ["gemma-3n-e2b"]
             }
         }
         api_model_layout = QVBoxLayout()
