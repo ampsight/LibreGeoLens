@@ -10,7 +10,7 @@ import shutil
 import datetime
 from openai import OpenAI
 from groq import Groq
-from google import genai
+import google.generativeai as genai
 import boto3
 import tempfile
 import ntpath
