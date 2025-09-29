@@ -25,14 +25,18 @@ A QGIS plugin for experimenting with Multimodal Large Language Models (MLLMs) to
 
 ### MLLM Services
 
-Right now the plugin only supports [OpenAI](https://platform.openai.com/docs/quickstart) (paid)
-and [Groq](https://console.groq.com/docs/quickstart) (free), and you need an API key to use either of them. Open QGIS and go to
-`Settings` -> `Options` -> `System` -> scroll down to `Environment`, toggle if needed, click on the `Use custom variables` checkbox,
-and add at least one of the following environment variables:
-- Variable: `OPENAI_API_KEY` - Value: your OpenAI API key.
-- Variable: `GROQ_API_KEY` - Value: your Groq API key.
+LibreGeoLens now routes all model traffic through [LiteLLM](https://docs.litellm.ai/), which unlocks many providers with a
+single integration. The plugin ships with presets for OpenAI, Groq, Anthropic, and Google AI Studio,
+and will only surface a provider in the UI when the required environment variables are available.
+Configure them in QGIS via `Settings` -> `Options` -> `System` -> scroll down to `Environment`, toggle if needed,
+enable `Use custom variables` if needed, and add the variables you plan to use:
+- `OPENAI_API_KEY` (optionally add `OPENAI_API_BASE` and/or `OPENAI_ORG_ID`)
+- `GROQ_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `GEMINI_API_KEY`
 
-Make sure to restart QGIS so that these changes take effect.
+Restart QGIS after setting environment variables. You can add additional MLLMs for any configured
+provider from the LibreGeoLens UI (`Add Model` button) without modifying the source code.
 
 ## Quickstart
 
@@ -194,7 +198,7 @@ ln -s /absolute/local/path/to/LibreGeoLens/libre_geo_lens ~/.local/share/QGIS/QG
 ```
 
 4. Open QGIS, go to `Plugins` -> `Manage and Install Plugins...` -> `Settings` -> `Show also Experimental Plugins` ->
-   `Installed Plugins` -> click on the checkbox for `LibreGeoLensDev`.
+   `Installed Plugins` -> click on the checkbox for `LibreGeoLens`.
 5. Now this plugin should appear when you click on Plugins and also the icons should show up on the right.
    If the plugin still doesn't appear, close and re-open QGIS and try again.
 6. In order to reload the plugin after the code in this repo is modified, you can install and use the *Plugin Reloader* plugin.

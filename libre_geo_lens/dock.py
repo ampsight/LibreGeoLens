@@ -18,6 +18,7 @@ import markdown
 import urllib.parse
 import ast
 import requests
+import litellm
 
 from .settings import SettingsDialog
 from .db import LogsDB
@@ -237,30 +238,79 @@ class LibreGeoLensDockWidget(QDockWidget):
 
         self.supported_api_clients = {
             "OpenAI": {
-                "class": OpenAI,
-                "models": ["gpt-4o-2024-08-06", "gpt-4o-mini-2024-07-18"],
+                "litellm_params": {"custom_llm_provider": "openai"},
+                "models": [
+                    "gpt-4o-2024-08-06",
+                    "gpt-4o-mini-2024-07-18",
+                    "gpt-4o",
+                    "gpt-4o-mini"
+                ],
                 "limits": {
                     "image_px": {
                         "longest_side": 2048,
                         "shortest_side": 768
                     }
-                }
+                },
+                "env_vars": [
+                    {"name": "OPENAI_API_KEY", "param": "api_key", "required": True},
+                    {"name": "OPENAI_API_BASE", "param": "api_base", "required": False},
+                    {"name": "OPENAI_ORG_ID", "param": "organization", "required": False}
+                ],
+                "supports_streaming": True
             },
             "Groq": {
-                "class": Groq,  # https://console.groq.com/docs/vision
-                "models": ["meta-llama/llama-4-maverick-17b-128e-instruct", "meta-llama/llama-4-scout-17b-16e-instruct"],
+                "litellm_params": {"custom_llm_provider": "groq"},
+                "models": [
+                    "meta-llama/llama-4-maverick-17b-128e-instruct",
+                    "meta-llama/llama-4-scout-17b-16e-instruct"
+                ],
                 "limits": {
                     "image_mb": 4
-                }
+                },
+                "env_vars": [
+                    {"name": "GROQ_API_KEY", "param": "api_key", "required": True}
+                ],
+                "supports_streaming": True
+            },
+            "Anthropic": {
+                "litellm_params": {"custom_llm_provider": "anthropic"},
+                "models": [
+                    "claude-3-5-sonnet-20241022",
+                    "claude-3-haiku-20240307"
+                ],
+                "limits": {
+                    "image_px": {
+                        "longest_side": 8000,
+                        "shortest_side": 8000
+                    }
+                },
+                "env_vars": [
+                    {"name": "ANTHROPIC_API_KEY", "param": "api_key", "required": True}
+                ],
+                "supports_streaming": True
+            },
+            "Google AI Studio": {
+                "litellm_params": {"custom_llm_provider": "gemini"},
+                "models": [
+                    "gemini-2.5-pro"
+                ],
+                "limits": {},  # no downscaling but bigger images are chipped
+                "env_vars": [
+                    {"name": "GEMINI_API_KEY", "param": "api_key", "required": True}
+                ],
+                "supports_streaming": True
             }
         }
+
+        self.added_models = self.load_added_models()
+        self.available_api_clients = {}
+
         api_model_layout = QVBoxLayout()
 
         self.api_label = QLabel("MLLM Service:")
         api_model_layout.addWidget(self.api_label)
 
         self.api_selection = QComboBox()
-        self.api_selection.addItems(list(self.supported_api_clients))
         self.api_selection.currentIndexChanged.connect(self.update_model_choices)
         self.api_selection.setToolTip("Select the MLLM service provider (requires API key in QGIS settings)")
         api_model_layout.addWidget(self.api_selection)
@@ -271,7 +321,12 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.model_selection.setToolTip("Select the specific multimodal model to use for analysis")
         api_model_layout.addWidget(self.model_selection)
 
-        self.update_model_choices()
+        self.add_model_button = QPushButton("Add Model")
+        self.add_model_button.setToolTip("Add a model for the selected MLLM service")
+        self.add_model_button.clicked.connect(self.add_model)
+        api_model_layout.addWidget(self.add_model_button)
+
+        self.refresh_available_api_clients()
 
         main_content_layout.addLayout(api_model_layout, stretch=1)
 
@@ -1129,12 +1184,187 @@ class LibreGeoLensDockWidget(QDockWidget):
         """Reset the info_dialog reference when the dialog is closed"""
         self.info_dialog = None
 
-    def update_model_choices(self):
-        """Update the model list based on the selected API."""
+    def load_added_models(self):
+        """Load user-defined models for each provider from settings."""
+        settings = QSettings("Ampsight", "LibreGeoLens")
+        stored = settings.value("added_models", "{}")
+        parsed = {}
+        if isinstance(stored, str):
+            try:
+                parsed = json.loads(stored)
+            except json.JSONDecodeError:
+                parsed = {}
+        elif isinstance(stored, dict):
+            parsed = stored
+        result = {}
+        if isinstance(parsed, dict):
+            for api_name, models in parsed.items():
+                if isinstance(models, (list, tuple)):
+                    cleaned = [m.strip() for m in models if isinstance(m, str) and m.strip()]
+                    if cleaned:
+                        result[api_name] = self._deduplicate_preserve_order(cleaned)
+        return result
+
+    def save_added_models(self):
+        """Persist user-defined models per provider."""
+        serializable = {api: self._deduplicate_preserve_order(models)
+                        for api, models in self.added_models.items() if models}
+        settings = QSettings("Ampsight", "LibreGeoLens")
+        settings.setValue("added_models", json.dumps(serializable))
+
+    def refresh_available_api_clients(self):
+        """Populate the provider dropdown based on available environment variables."""
+        self.available_api_clients = {}
+        for api_name, api_info in self.supported_api_clients.items():
+            if not self.get_missing_env_vars(api_info):
+                self.available_api_clients[api_name] = api_info
+
+        self.api_selection.blockSignals(True)
+        self.api_selection.clear()
+        if not self.available_api_clients:
+            self.api_selection.addItem("No configured providers")
+            self.api_selection.setEnabled(False)
+            self.model_selection.clear()
+            self.model_selection.setEnabled(False)
+            self.add_model_button.setEnabled(False)
+            self.api_selection.blockSignals(False)
+            return
+
+        self.api_selection.setEnabled(True)
+        self.model_selection.setEnabled(True)
+        self.add_model_button.setEnabled(True)
+        for api_name in self.available_api_clients:
+            self.api_selection.addItem(api_name)
+        self.api_selection.blockSignals(False)
+        self.update_model_choices()
+
+    @staticmethod
+    def get_missing_env_vars(api_config):
+        missing = []
+        for env_info in api_config.get("env_vars", []):
+            if isinstance(env_info, dict):
+                name = env_info.get("name")
+                required = env_info.get("required", True)
+            else:
+                name = env_info
+                required = True
+            if not name:
+                continue
+            if required and not os.getenv(name):
+                missing.append(name)
+        return missing
+
+    @staticmethod
+    def build_auth_params(api_config):
+        params = {}
+        for env_info in api_config.get("env_vars", []):
+            if not isinstance(env_info, dict):
+                continue
+            name = env_info.get("name")
+            param = env_info.get("param")
+            if not name or not param:
+                continue
+            value = os.getenv(name)
+            if value:
+                params[param] = value
+        return params
+
+    def add_model(self):
+        if not self.available_api_clients:
+            QMessageBox.information(self.iface.mainWindow(), "No Provider", "Configure an MLLM provider before adding models.")
+            return
         api = self.api_selection.currentText()
-        models = self.supported_api_clients[api]["models"]
+        if api not in self.available_api_clients:
+            QMessageBox.warning(self.iface.mainWindow(), "Error", "Select a configured MLLM provider first.")
+            return
+        model_name, ok = QInputDialog.getText(self.iface.mainWindow(), "Add Model", "Enter the full model identifier:")
+        if not ok or not model_name.strip():
+            return
+        model_name = model_name.strip()
+        existing = self._deduplicate_preserve_order(
+            self.supported_api_clients.get(api, {}).get("models", []) +
+            self.added_models.get(api, [])
+        )
+        if model_name in existing:
+            QMessageBox.information(self.iface.mainWindow(), "Model Exists", "That model is already listed for this provider.")
+            return
+        if not litellm.supports_vision(model=model_name):
+            QMessageBox.information(self.iface.mainWindow(), "Model Not Supported",
+                                    f"""Model "{model_name}" does not exist or does not support vision. """
+                                    f"""Please double-check spelling and vision capabilities.""")
+            return
+        self.added_models.setdefault(api, [])
+        self.added_models[api].append(model_name)
+        self.added_models[api] = self._deduplicate_preserve_order(self.added_models[api])
+        self.save_added_models()
+        self.update_model_choices(select_model=model_name)
+
+    @staticmethod
+    def _deduplicate_preserve_order(items):
+        seen = set()
+        result = []
+        for item in items:
+            if item in seen:
+                continue
+            seen.add(item)
+            result.append(item)
+        return result
+
+    @staticmethod
+    def extract_stream_chunk_content(chunk):
+        if not chunk:
+            return None
+        choices = getattr(chunk, "choices", None)
+        if choices is None and isinstance(chunk, dict):
+            choices = chunk.get("choices")
+        if not choices:
+            return None
+        choice = choices[0]
+        delta = getattr(choice, "delta", None) if not isinstance(choice, dict) else choice.get("delta")
+        if delta is None:
+            return None
+        if isinstance(delta, dict):
+            return delta.get("content")
+        return getattr(delta, "content", None)
+
+    @staticmethod
+    def extract_completion_text(response):
+        if not response:
+            return ""
+        choices = getattr(response, "choices", None)
+        if choices is None and isinstance(response, dict):
+            choices = response.get("choices")
+        if not choices:
+            return ""
+        choice = choices[0]
+        message = getattr(choice, "message", None) if not isinstance(choice, dict) else choice.get("message")
+        if message is None:
+            return ""
+        if isinstance(message, dict):
+            return message.get("content", "")
+        return getattr(message, "content", "")
+
+    def update_model_choices(self, *_, select_model=None):
+        """Update the model list based on the selected API."""
+        if not getattr(self, "available_api_clients", {}):
+            self.model_selection.clear()
+            return
+        api = self.api_selection.currentText()
+        if api not in self.available_api_clients:
+            self.model_selection.clear()
+            return
+        base_models = self.supported_api_clients.get(api, {}).get("models", [])
+        added = self.added_models.get(api, [])
+        combined = sorted(self._deduplicate_preserve_order(base_models + added))
         self.model_selection.clear()
-        self.model_selection.addItems(models)
+        self.model_selection.addItems(combined)
+        if select_model and select_model in combined:
+            self.model_selection.setCurrentIndex(combined.index(select_model))
+        elif combined:
+            self.model_selection.setCurrentIndex(0)
+        else:
+            self.model_selection.setCurrentIndex(-1)
+
 
     def delete_chat(self):
         """Delete the selected chat after confirmation"""
@@ -1229,16 +1459,32 @@ class LibreGeoLensDockWidget(QDockWidget):
             return
 
         selected_api = self.api_selection.currentText()
-        selected_model = self.model_selection.currentText()
-        api_key = os.getenv(selected_api.upper() + "_API_KEY")
-        if api_key is None:
+        if selected_api not in getattr(self, "available_api_clients", {}):
             QMessageBox.warning(
-                self.iface.mainWindow(), "Error",
-                f"{selected_api} API key not set."
-                f" Please refer to https://github.com/ampsight/LibreGeoLens?tab=readme-ov-file#mllm-services"
+                self.iface.mainWindow(),
+                "Error",
+                "No configured MLLM service found. Set the required environment variables and restart QGIS."
             )
             return
-        client = self.supported_api_clients[selected_api]["class"](api_key=api_key)
+
+        selected_model = self.model_selection.currentText()
+        if not selected_model:
+            QMessageBox.warning(self, "Error", "No model available for the selected MLLM service.")
+            return
+
+        api_config = self.supported_api_clients[selected_api]
+        missing_env = self.get_missing_env_vars(api_config)
+        if missing_env:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Error",
+                f"{selected_api} configuration incomplete. Missing environment variables: {', '.join(missing_env)}."
+            )
+            return
+
+        auth_params = self.build_auth_params(api_config)
+        base_completion_kwargs = dict(api_config.get("litellm_params", {}))
+        base_completion_kwargs.update(auth_params)
 
         prompt = self.prompt_input.toPlainText()
         if not prompt.strip():
@@ -1407,43 +1653,82 @@ class LibreGeoLensDockWidget(QDockWidget):
             processed_conversation.append(processed_message)
             
         # Start API call with processed conversation data
-        response_stream = client.chat.completions.create(
-            model=selected_model,
-            messages=processed_conversation,
-            stream=True
-        )
-
-        # Process the stream with fewer UI updates
+        stream_supported = api_config.get("supports_streaming", True)
         update_counter = 0
         update_frequency = 2  # Update UI every N chunks to reduce UI redraws
+        stream_success = False
+        stream_error = None
 
-        for chunk in response_stream:
-            content = chunk.choices[0].delta.content
-            if content is None:
-                continue
+        if stream_supported:
+            try:
+                response_stream = litellm.completion(
+                    model=selected_model,
+                    messages=processed_conversation,
+                    stream=True,
+                    **base_completion_kwargs
+                )
+                for chunk in response_stream:
+                    content = self.extract_stream_chunk_content(chunk)
+                    if content is None:
+                        continue
 
-            response_buffer.append(content)
-            update_counter += 1
+                    response_buffer.append(content)
+                    update_counter += 1
 
-            # Only update UI periodically to improve performance
-            if update_counter >= update_frequency:
-                accumulated_text += ''.join(response_buffer)
-                rendered_markdown = markdown.markdown(accumulated_text)
-                updated_html = full_html + rendered_markdown
-                self.chat_history.setHtml(updated_html)
-                self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
-                QApplication.processEvents()
+                    if update_counter >= update_frequency:
+                        accumulated_text += ''.join(response_buffer)
+                        rendered_markdown = markdown.markdown(accumulated_text)
+                        updated_html = full_html + rendered_markdown
+                        self.chat_history.setHtml(updated_html)
+                        self.chat_history.verticalScrollBar().setValue(
+                            self.chat_history.verticalScrollBar().maximum()
+                        )
+                        QApplication.processEvents()
+                        response_buffer = []
+                        update_counter = 0
+
+                stream_success = True
+            except Exception as e:
+                QMessageBox.information(
+                    self.iface.mainWindow(),
+                    "Streaming Error",
+                    str(e)
+                )
                 response_buffer = []
-                update_counter = 0
+                accumulated_text = f"<b>{selected_model} ({selected_api}):</b> "
+                self.chat_history.setHtml(full_html)
+                self.chat_history.verticalScrollBar().setValue(
+                    self.chat_history.verticalScrollBar().maximum()
+                )
+                QApplication.processEvents()
 
-        # Final update with any remaining content
-        if response_buffer:
+        if stream_success and response_buffer:
             accumulated_text += ''.join(response_buffer)
 
-        # Complete response
-        response = accumulated_text.replace(f"<b>{selected_model} ({selected_api}):</b> ", "")
-        full_html += markdown.markdown(accumulated_text)
-        self.chat_history.setHtml(full_html)
+        if not stream_success:
+            try:
+                non_stream_response = litellm.completion(
+                    model=selected_model,
+                    messages=processed_conversation,
+                    **base_completion_kwargs
+                )
+            except Exception as exc:
+                if stream_error is not None:
+                    raise exc from stream_error
+                raise
+            content_text = self.extract_completion_text(non_stream_response)
+            accumulated_text += content_text
+
+        response = accumulated_text.replace(
+            f"<b>{selected_model} ({selected_api}):</b> ", ""
+        )
+        rendered_markdown = markdown.markdown(accumulated_text)
+        final_html = full_html + rendered_markdown
+        self.chat_history.setHtml(final_html)
+        self.chat_history.verticalScrollBar().setValue(
+            self.chat_history.verticalScrollBar().maximum()
+        )
+        QApplication.processEvents()
 
         self.conversation.append({"role": "assistant", "content": response})
         interaction_id = self.logs_db.save_interaction(
@@ -1456,15 +1741,26 @@ class LibreGeoLensDockWidget(QDockWidget):
         )
         self.logs_db.add_new_interaction_to_chat(self.current_chat_id, interaction_id)
 
-        summary = client.chat.completions.create(
-            model=selected_model,
-            messages=[
-                {"role": "user", "content": [{"type": "text", "text":
-                    f"Summarize the following in 10 words or less: {self.chat_history.toPlainText()}."
-                    f" Only respond with your summary."}]}]
-        ).choices[0].message.content.strip()
-        self.logs_db.update_chat_summary(self.current_chat_id, summary)
-        self.chat_list.currentItem().setText(summary)
+        summary_text = ""
+        try:
+            summary_response = litellm.completion(
+                model=selected_model,
+                messages=[
+                    {"role": "user", "content": [{"type": "text", "text":
+                        f"Summarize the following in 10 words or less: {self.chat_history.toPlainText()}."
+                        f" Only respond with your summary."}]}
+                ],
+                **base_completion_kwargs
+            )
+            summary_text = self.extract_completion_text(summary_response).strip()
+        except Exception as exc:
+            print(f"Failed to generate summary via {selected_api}: {exc}")
+
+        if summary_text:
+            self.logs_db.update_chat_summary(self.current_chat_id, summary_text)
+            current_item = self.chat_list.currentItem()
+            if current_item is not None:
+                current_item.setText(summary_text)
 
         for idx in range(n_images):
             request = QgsFeatureRequest().setFilterExpression(
@@ -1904,7 +2200,7 @@ class LibreGeoLensDockWidget(QDockWidget):
             "type": "FeatureCollection",
             "features": geojson_features
         }
-        
+
         # Save GeoJSON file
         geojson_path = os.path.join(export_folder_path, "chat_features.geojson")
         with open(geojson_path, 'w', encoding='utf-8') as geojson_file:
