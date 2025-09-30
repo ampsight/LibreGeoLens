@@ -435,6 +435,32 @@ class LibreGeoLensDockWidget(QDockWidget):
 
         # ----------------
 
+        self._stream_lock_targets = [
+            self.start_new_chat_button,
+            self.delete_chat_button,
+            self.export_chat_button,
+            self.open_logs_dir_button,
+            self.draw_area_button,
+            self.select_area_button,
+            self.load_geojson_button,
+            self.get_cogs_button,
+            self.help_button,
+            self.info_button,
+            self.send_to_mllm_button,
+            self.add_model_button,
+            self.chat_list,
+            self.prompt_input,
+            self.image_display_widget,
+            self.api_selection,
+            self.model_selection,
+            self.reasoning_effort_combo,
+            self.radio_chip,
+            self.radio_raw,
+        ]
+        self._stream_locked_states = None
+
+        # ----------------
+
         settings = QSettings()
         self.qgis_theme = settings.value("UI/UITheme")
         is_dark_mode = QApplication.palette().color(QPalette.Window).value() < 128
@@ -560,6 +586,31 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.setMinimumWidth(int(dock_width))
         self.resize(int(dock_width), int(available_geometry.height()))
 
+    def _lock_ui_for_stream(self):
+        if self._stream_locked_states is not None:
+            return
+        self._stream_locked_states = {}
+        for widget in self._stream_lock_targets:
+            if widget is None:
+                continue
+            self._stream_locked_states[widget] = widget.isEnabled()
+            widget.setEnabled(False)
+
+    def _unlock_ui_after_stream(self):
+        locked_states = self._stream_locked_states
+        if locked_states is None:
+            self.update_reasoning_controls_state()
+            return
+        for widget, enabled in locked_states.items():
+            if widget is None:
+                continue
+            widget.setEnabled(enabled)
+        self._stream_locked_states = None
+        self.update_reasoning_controls_state()
+
+    def _has_active_stream(self):
+        return bool(self.active_streams)
+
     def highlight_button(self, button):
         if self.current_highlighted_button:
             self.current_highlighted_button.setStyleSheet("")
@@ -579,6 +630,8 @@ class LibreGeoLensDockWidget(QDockWidget):
 
     def handle_anchor_click(self, url):
         url_str = url.toString() if type(url) != str else url
+        if self._has_active_stream() and not url_str.startswith("toggle://reasoning/"):
+            return
         if url_str.startswith("toggle://reasoning/"):
             toggle_id = url_str.split("toggle://reasoning/", 1)[1]
             for entry in self.rendered_interactions:
@@ -2032,6 +2085,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         request_context["worker"] = worker
         request_context["thread"] = thread
         self.active_streams[entry_id] = request_context
+        self._lock_ui_for_stream()
 
         worker.chunk_received.connect(self._worker_chunk_received)
         worker.stream_failed.connect(self._worker_stream_failed)
@@ -2365,10 +2419,14 @@ class LibreGeoLensDockWidget(QDockWidget):
         ctx = context if context is not None else self.active_streams.get(entry_id)
         self.active_streams.pop(entry_id, None)
         if not ctx:
+            if not self.active_streams:
+                self._unlock_ui_after_stream()
             return
         thread = ctx.get("thread")
         if thread and thread.isRunning():
             thread.quit()
+        if not self.active_streams:
+            self._unlock_ui_after_stream()
 
     def reload_current_chat(self):
         item = self.chat_list.currentItem()
