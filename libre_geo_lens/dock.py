@@ -27,10 +27,10 @@ from .custom_qt import (zoom_to_and_flash_feature, CustomTextBrowser, ImageDispl
                         AreaDrawingTool, IdentifyDrawnAreaTool)
 
 from qgis.PyQt.QtGui import QPixmap, QImage, QColor, QTextOption, QPalette
-from qgis.PyQt.QtCore import QBuffer, QByteArray, Qt, QSettings, QVariant, QSize, QTimer
+from qgis.PyQt.QtCore import QBuffer, QByteArray, Qt, QSettings, QVariant, QSize, QTimer, QSignalBlocker
 from qgis.PyQt.QtWidgets import (QSizePolicy, QFileDialog, QMessageBox, QInputDialog, QComboBox, QLabel, QVBoxLayout,
                                  QPushButton, QWidget, QTextEdit, QApplication, QRadioButton, QHBoxLayout, QDockWidget,
-                                 QSplitter, QListWidget, QListWidgetItem, QDialog, QTextBrowser)
+                                 QSplitter, QListWidget, QListWidgetItem, QDialog, QTextBrowser, QCheckBox)
 from qgis.core import (QgsVectorLayer, QgsRasterLayer, QgsSymbol, QgsSimpleLineSymbolLayer, QgsUnitTypes,
                        QgsRectangle, QgsWkbTypes, QgsProject, QgsGeometry, QgsMapRendererParallelJob, QgsFeature,
                        QgsField, QgsVectorFileWriter, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
@@ -48,6 +48,7 @@ class LibreGeoLensDockWidget(QDockWidget):
 
         self.current_chat_id = None
         self.conversation = []
+        self.rendered_interactions = []
         self.help_dialog = None
         self.info_dialog = None
 
@@ -320,6 +321,21 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.model_selection = QComboBox()
         self.model_selection.setToolTip("Select the specific multimodal model to use for analysis")
         api_model_layout.addWidget(self.model_selection)
+        self.model_selection.currentIndexChanged.connect(self.update_reasoning_controls_state)
+
+        self.reasoning_effort_label = QLabel("Reasoning Effort:")
+        self.reasoning_effort_label.setToolTip("Control the reasoning effort for supported models")
+        self.reasoning_effort_combo = QComboBox()
+        self.reasoning_effort_combo.setToolTip("Select the amount of reasoning effort to request")
+        self.reasoning_effort_combo.addItem("Low", "low")
+        self.reasoning_effort_combo.addItem("Medium", "medium")
+        self.reasoning_effort_combo.addItem("High", "high")
+        self.reasoning_effort_combo.currentIndexChanged.connect(self.update_reasoning_controls_state)
+        reasoning_controls_layout = QHBoxLayout()
+        reasoning_controls_layout.addWidget(self.reasoning_effort_label)
+        reasoning_controls_layout.addWidget(self.reasoning_effort_combo)
+        reasoning_controls_layout.addStretch()
+        api_model_layout.addLayout(reasoning_controls_layout)
 
         self.add_model_button = QPushButton("Add Model")
         self.add_model_button.setToolTip("Add a model for the selected MLLM service")
@@ -479,6 +495,14 @@ class LibreGeoLensDockWidget(QDockWidget):
 
     def handle_anchor_click(self, url):
         url_str = url.toString() if type(url) != str else url
+        if url_str.startswith("toggle://reasoning/"):
+            toggle_id = url_str.split("toggle://reasoning/", 1)[1]
+            for entry in self.rendered_interactions:
+                if entry.get("display_id") == toggle_id:
+                    entry["reasoning_visible"] = not entry.get("reasoning_visible", False)
+                    self.render_chat_history(scroll_to_end=False)
+                    break
+            return
         if url_str.startswith("image://"):
             image_path = urllib.parse.unquote(url_str.replace("image://", "", 1))
             if os.name == "nt":
@@ -531,6 +555,7 @@ class LibreGeoLensDockWidget(QDockWidget):
     def start_new_chat(self):
         self.current_chat_id = self.logs_db.save_chat([])
         self.conversation = []
+        self.rendered_interactions = []
         self.chat_history.clear()
         self.load_chat_list()
         new_chat = self.chat_list.item(self.chat_list.count() - 1)
@@ -546,111 +571,195 @@ class LibreGeoLensDockWidget(QDockWidget):
         chat_id = item.data(Qt.UserRole)
         self.current_chat_id = chat_id
         self.conversation = []
+        self.rendered_interactions = []
         self.chat_history.clear()
 
-        # Get chat data
-        interactions_sequence = json.loads(self.logs_db.fetch_chat_by_id(chat_id)[1])
-        
-        # Build full HTML content at once rather than appending incrementally
-        full_html = []
-        
+        if chat_id is None:
+            return
+
+        chat_record = self.logs_db.fetch_chat_by_id(chat_id)
+        if not chat_record:
+            return
+
+        interactions_sequence = json.loads(chat_record[1])
+
         for interaction_id in interactions_sequence:
+            interaction = self.logs_db.fetch_interaction_by_id(interaction_id)
+            if not interaction:
+                continue
+
             (_, prompt, response, chip_ids, mllm_service, mllm_model, chip_modes,
-             original_resolutions, actual_resolutions) = self.logs_db.fetch_interaction_by_id(
-                interaction_id
-            )
+             original_resolutions, actual_resolutions, reasoning_output) = interaction
 
-            # Add unique interaction ID to the HTML for scrolling
-            user_html = (
-                f'<div id="interaction-{interaction_id}">'
-                f'{markdown.markdown(f"**User:** {prompt}")}'
-                f'</div>'
-            )
-            full_html.append(user_html)
+            reasoning_value = reasoning_output if reasoning_output not in (None, "", "None") else None
 
-            # Add the interaction to the conversation list
+            entry = {
+                "display_id": str(interaction_id),
+                "db_id": interaction_id,
+                "prompt": prompt,
+                "chips": [],
+                "mllm_service": mllm_service,
+                "mllm_model": mllm_model,
+                "response": response or "",
+                "response_stream": "",
+                "reasoning": reasoning_value,
+                "reasoning_stream": "",
+                "reasoning_visible": False,
+                "is_pending": False,
+                "has_reasoning": bool(reasoning_value),
+            }
+
             self.conversation.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
 
-            # Process chips associated with this interaction
             chip_ids_list = json.loads(chip_ids)
-            chip_modes_list = ast.literal_eval(chip_modes)
+            try:
+                chip_modes_list = ast.literal_eval(chip_modes)
+            except (ValueError, SyntaxError):
+                chip_modes_list = ["screen"] * len(chip_ids_list)
+
             try:
                 original_resolutions_list = ast.literal_eval(original_resolutions) if original_resolutions else []
                 actual_resolutions_list = ast.literal_eval(actual_resolutions) if actual_resolutions else []
-            except (TypeError, json.JSONDecodeError):
-                # Handle case where columns might be NULL or invalid in older database entries
+            except (TypeError, ValueError, json.JSONDecodeError):
                 original_resolutions_list = []
                 actual_resolutions_list = []
-            
-            # Ensure lists exist and have correct length (for backward compatibility)
+
             if not original_resolutions_list:
                 original_resolutions_list = ["Unknown"] * len(chip_ids_list)
             if not actual_resolutions_list:
                 actual_resolutions_list = ["Unknown"] * len(chip_ids_list)
-            
-            # Optimize image loading - only load visible thumbnails
-            for i, (chip_id, chip_mode) in enumerate(zip(chip_ids_list, chip_modes_list)):
-                image_path = self.logs_db.fetch_chip_by_id(chip_id)[1]
-                normalized_path = image_path.replace("\\", "/")
-                
-                # Get resolution information
-                original_res = original_resolutions_list[i] if i < len(original_resolutions_list) else "Unknown"
-                actual_res = actual_resolutions_list[i] if i < len(actual_resolutions_list) else "Unknown"
-                
-                # Create resolution display text
-                resolution_html = ""
-                if original_res != "Unknown":
-                    if original_res != actual_res:
-                        resolution_html = (
-                            f'<span style="position: absolute; bottom: 3px; left: 5px; color: {self.text_color}; '
-                            f'font-size: 10px">{original_res} → {actual_res}</span>'
-                        )
-                    else:
-                        resolution_html = (
-                            f'<span style="position: absolute; bottom: 3px; left: 5px; color: {self.text_color}; '
-                            f'font-size: 10px">{original_res}</span>'
-                        )
-                
-                # Use file path for src instead of base64 for thumbnail display
-                # This defers actual image loading until display time
-                image_html = (
-                    f'<div style="position: relative; display: inline-block;">'
-                    f'    <a href="image://{normalized_path}" style="text-decoration: none;">'
-                    f'        <img src="file:///{normalized_path}" width="75" loading="lazy"/>'
-                    f'    </a>'
-                    f'    <span style="position: absolute; top: 3px; right: 5px; color: {self.text_color}; font-size: 10px">'
-                    f'        ({"Raw" if chip_mode == "raw" else "Screen"} Chip)'
-                    f'    </span>'
-                    f'{resolution_html}'
-                    f'</div>'
-                )
-                full_html.append(image_html)
-                
-                # For conversation history, we need to load base64 data for API calls
-                # But we'll do this only when sending to MLLM, not during chat display
-                if chip_mode == "raw":
-                    sent_image_path = image_path.replace("_screen.png", "_raw.png")
-                else:
-                    sent_image_path = image_path
-                    
-                # Store the image path but don't convert to base64 yet - will do when sending message
+
+            for idx, (chip_id, chip_mode) in enumerate(zip(chip_ids_list, chip_modes_list)):
+                chip = self.logs_db.fetch_chip_by_id(chip_id)
+                if not chip:
+                    continue
+
+                image_path = chip[1]
+                normalized_path = self._normalize_path(image_path)
+                display_mode = "Raw" if chip_mode == "raw" else "Screen"
+
+                original_res = original_resolutions_list[idx] if idx < len(original_resolutions_list) else "Unknown"
+                actual_res = actual_resolutions_list[idx] if idx < len(actual_resolutions_list) else "Unknown"
+                resolution_text = self._format_resolution_text(original_res, actual_res)
+
+                entry["chips"].append({
+                    "image_path": normalized_path,
+                    "mode_label": display_mode,
+                    "resolution_text": resolution_text,
+                })
+
+                sent_image_path = image_path.replace("_screen.png", "_raw.png") if chip_mode == "raw" else image_path
                 self.conversation[-1]["content"].append(
                     {"type": "local_image_path", "path": sent_image_path, "mode": chip_mode}
                 )
 
-            # Add assistant response with unique interaction ID
-            assistant_html = (
-                f'<div id="interaction-{interaction_id}-response">'
-                f'{markdown.markdown(f"**{mllm_model} ({mllm_service}):** {response}")}'
-                f'</div>'
-            )
-            full_html.append(assistant_html)
+            self.conversation.append({"role": "assistant", "content": response or ""})
+            self.rendered_interactions.append(entry)
 
-            # Add the assistant's response to the conversation list
-            self.conversation.append({"role": "assistant", "content": response})
-            
-        # Set the complete HTML content once instead of multiple appends
-        self.chat_history.setHtml(''.join(full_html))
+        self.render_chat_history()
+
+    def render_chat_history(self, scroll_to_end=True):
+        if not self.rendered_interactions:
+            self.chat_history.clear()
+            return
+
+        html_parts = []
+
+        for entry in self.rendered_interactions:
+            user_html = markdown.markdown(f"**User:** {entry['prompt']}")
+            html_parts.append(
+                f'<div id="interaction-{entry["display_id"]}">{user_html}</div>'
+            )
+
+            for chip in entry.get("chips", []):
+                resolution_span = ""
+                if chip.get("resolution_text"):
+                    resolution_span = (
+                        f'<span style="position: absolute; bottom: 3px; left: 5px; color: {self.text_color}; '
+                        f'font-size: 10px">{chip["resolution_text"]}</span>'
+                    )
+
+                html_parts.append(
+                    f'<div style="position: relative; display: inline-block;">'
+                    f'    <a href="image://{chip["image_path"]}" style="text-decoration: none;">'
+                    f'        <img src="file:///{chip["image_path"]}" width="75" loading="lazy"/>'
+                    f'    </a>'
+                    f'    <span style="position: absolute; top: 3px; right: 5px; color: {self.text_color}; font-size: 10px">'
+                    f'        ({chip["mode_label"]} Chip)'
+                    f'    </span>'
+                    f'{resolution_span}'
+                    f'</div>'
+                )
+
+            response_text = entry.get("response_stream") if entry.get("is_pending") else entry.get("response", "")
+            response_text = response_text or ""
+
+            if response_text:
+                assistant_markdown = markdown.markdown(
+                    f"**{entry['mllm_model']} ({entry['mllm_service']}):** {response_text}"
+                )
+            else:
+                assistant_markdown = markdown.markdown(
+                    f"**{entry['mllm_model']} ({entry['mllm_service']}):**"
+                )
+
+            html_parts.append(
+                f'<div id="interaction-{entry["display_id"]}-response">{assistant_markdown}</div>'
+            )
+
+            if litellm.supports_reasoning(entry['mllm_model']):
+                toggle_label = "Hide reasoning" if entry.get("reasoning_visible") else "Show reasoning"
+                html_parts.append(
+                    f'<div style="margin: 4px 0;">'
+                    f'    <a href="toggle://reasoning/{entry["display_id"]}" style="text-decoration: none;">'
+                    f'{toggle_label}'
+                    f'    </a>'
+                    f'</div>'
+                )
+
+                if entry.get("reasoning_visible"):
+                    html_parts.append(self._build_reasoning_html(entry))
+
+        html = ''.join(html_parts)
+        self.chat_history.setHtml(html)
+
+        if scroll_to_end:
+            self.chat_history.verticalScrollBar().setValue(
+                self.chat_history.verticalScrollBar().maximum()
+            )
+
+    def _build_reasoning_html(self, entry):
+        reasoning_text = entry.get("reasoning_stream") if entry.get("is_pending") else entry.get("reasoning")
+        reasoning_text = reasoning_text or ""
+
+        if reasoning_text.strip():
+            reasoning_html = markdown.markdown(reasoning_text)
+        else:
+            if entry.get("is_pending"):
+                reasoning_html = "<p><i>Reasoning content not yet available.</i></p>"
+            else:
+                reasoning_html = "<p><i>Reasoning content not available.</i></p>"
+
+        return (
+            '<div class="reasoning-block" '
+            'style="border-left: 2px solid #ccc; padding: 6px 8px; margin: 4px 0 12px; background-color: #fafafa;">'
+            f'{reasoning_html}'
+            '</div>'
+        )
+
+    @staticmethod
+    def _format_resolution_text(original, actual):
+        if not original or original == "Unknown":
+            return ""
+        if not actual or actual == "Unknown" or original == actual:
+            return original
+        return f"{original} → {actual}"
+
+    @staticmethod
+    def _normalize_path(path_value):
+        if not path_value:
+            return ""
+        return path_value.replace('\\', '/')
 
     def load_image_base64_downscale_if_needed(self, image_path, api):
         image = Image.open(image_path)
@@ -1237,6 +1346,7 @@ class LibreGeoLensDockWidget(QDockWidget):
             self.api_selection.addItem(api_name)
         self.api_selection.blockSignals(False)
         self.update_model_choices()
+        self.update_reasoning_controls_state()
 
     @staticmethod
     def get_missing_env_vars(api_config):
@@ -1311,38 +1421,116 @@ class LibreGeoLensDockWidget(QDockWidget):
         return result
 
     @staticmethod
-    def extract_stream_chunk_content(chunk):
+    def _split_assistant_content(content):
+        text_parts = []
+        reasoning_parts = []
+
+        def handle(fragment, force_reasoning=False):
+            if fragment is None:
+                return
+            if isinstance(fragment, str):
+                (reasoning_parts if force_reasoning else text_parts).append(fragment)
+                return
+            if isinstance(fragment, (list, tuple)):
+                for item in fragment:
+                    handle(item, force_reasoning=force_reasoning)
+                return
+            if isinstance(fragment, dict):
+                fragment_type = fragment.get("type")
+                type_lower = fragment_type.lower() if isinstance(fragment_type, str) else ""
+                current_force_reasoning = force_reasoning or ("reason" in type_lower if type_lower else False)
+
+                if "text" in fragment and isinstance(fragment.get("text"), str):
+                    if current_force_reasoning:
+                        reasoning_parts.append(fragment["text"])
+                    elif not (type_lower and type_lower.startswith("tool")):
+                        text_parts.append(fragment["text"])
+
+                if "content" in fragment:
+                    handle(fragment.get("content"), force_reasoning=current_force_reasoning)
+
+                if "reasoning" in fragment:
+                    handle(fragment.get("reasoning"), force_reasoning=True)
+
+                if "delta" in fragment:
+                    handle(fragment.get("delta"), force_reasoning=current_force_reasoning)
+                return
+
+            text_attr = getattr(fragment, "text", None)
+            if isinstance(text_attr, str):
+                (reasoning_parts if force_reasoning else text_parts).append(text_attr)
+
+            content_attr = getattr(fragment, "content", None)
+            if content_attr is not None:
+                handle(content_attr, force_reasoning=force_reasoning)
+
+            reasoning_attr = getattr(fragment, "reasoning", None)
+            if reasoning_attr is not None:
+                handle(reasoning_attr, force_reasoning=True)
+
+        handle(content)
+        return "".join(text_parts), "".join(reasoning_parts)
+
+    @staticmethod
+    def parse_stream_chunk(chunk):
         if not chunk:
-            return None
+            return "", ""
         choices = getattr(chunk, "choices", None)
         if choices is None and isinstance(chunk, dict):
             choices = chunk.get("choices")
         if not choices:
-            return None
+            return "", ""
         choice = choices[0]
         delta = getattr(choice, "delta", None) if not isinstance(choice, dict) else choice.get("delta")
         if delta is None:
-            return None
+            return "", ""
+
         if isinstance(delta, dict):
-            return delta.get("content")
-        return getattr(delta, "content", None)
+            content = delta.get("content")
+            reasoning_payload = delta.get("reasoning_content")
+        else:
+            content = getattr(delta, "content", None)
+            reasoning_payload = getattr(delta, "reasoning_content", None)
+
+        text, reasoning = LibreGeoLensDockWidget._split_assistant_content(content)
+        if reasoning_payload:
+            extra_text, extra_reasoning = LibreGeoLensDockWidget._split_assistant_content(reasoning_payload)
+            if extra_reasoning:
+                reasoning += extra_reasoning
+            elif extra_text:
+                reasoning += extra_text
+        return text, reasoning
 
     @staticmethod
-    def extract_completion_text(response):
+    def parse_completion_response(response):
         if not response:
-            return ""
+            return "", ""
         choices = getattr(response, "choices", None)
         if choices is None and isinstance(response, dict):
             choices = response.get("choices")
         if not choices:
-            return ""
+            return "", ""
         choice = choices[0]
         message = getattr(choice, "message", None) if not isinstance(choice, dict) else choice.get("message")
         if message is None:
-            return ""
-        if isinstance(message, dict):
-            return message.get("content", "")
-        return getattr(message, "content", "")
+            return "", ""
+
+        content = message.get("content")
+        reasoning_payload = message.get("reasoning_content")
+
+        text, reasoning = LibreGeoLensDockWidget._split_assistant_content(content)
+        if reasoning_payload:
+            extra_text, extra_reasoning = LibreGeoLensDockWidget._split_assistant_content(reasoning_payload)
+            if extra_reasoning:
+                reasoning += extra_reasoning
+            elif extra_text:
+                reasoning += extra_text
+        return text, reasoning
+
+    @staticmethod
+    def extract_completion_text(response):
+        text, _ = LibreGeoLensDockWidget.parse_completion_response(response)
+        return text
 
     def update_model_choices(self, *_, select_model=None):
         """Update the model list based on the selected API."""
@@ -1364,6 +1552,31 @@ class LibreGeoLensDockWidget(QDockWidget):
             self.model_selection.setCurrentIndex(0)
         else:
             self.model_selection.setCurrentIndex(-1)
+
+        self.update_reasoning_controls_state()
+
+    def update_reasoning_controls_state(self):
+        supported = litellm.supports_reasoning(model=self.model_selection.currentText())
+        self.reasoning_effort_combo.setEnabled(supported)
+        self.reasoning_effort_label.setEnabled(supported)
+
+    def _handle_stream_failure(self, entry, error):
+        QMessageBox.information(
+            self.iface.mainWindow(),
+            "Streaming Error",
+            str(error)
+        )
+        entry["response_stream"] = ""
+        entry["reasoning_stream"] = ""
+        entry["has_reasoning"] = False
+        self.render_chat_history()
+        QApplication.processEvents()
+
+    def build_reasoning_params(self, model_name):
+        if not litellm.supports_reasoning(model=model_name):
+            return {}
+        params = {"reasoning_effort": self.reasoning_effort_combo.currentData()}
+        return params
 
 
     def delete_chat(self):
@@ -1485,33 +1698,32 @@ class LibreGeoLensDockWidget(QDockWidget):
         auth_params = self.build_auth_params(api_config)
         base_completion_kwargs = dict(api_config.get("litellm_params", {}))
         base_completion_kwargs.update(auth_params)
+        reasoning_params = self.build_reasoning_params(selected_model)
+        base_completion_kwargs.update(reasoning_params)
 
         prompt = self.prompt_input.toPlainText()
         if not prompt.strip():
             QMessageBox.warning(self, "Error", "Please enter a prompt.")
             return
-        
-        # First collect user message and prepare data structures
-        user_html = f'<div>{markdown.markdown(f"**User:** {prompt}")}</div>'
+
         self.prompt_input.clear()
-        self.conversation.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
-        
-        # Instead of updating UI for each image, collect HTML for batch update
-        image_html_list = []
-        
+
+        user_message = {"role": "user", "content": [{"type": "text", "text": prompt}]}
+        self.conversation.append(user_message)
+
         n_images = len(self.image_display_widget.images)
         chip_ids_sequence, chip_modes_sequence = [], []
         chips_original_resolutions, chips_actual_resolutions = [], []
+        chips_display = []
         send_raw = self.radio_raw.isChecked()
-        
-        # Process all images first before updating UI
+
         for idx in range(n_images):
-            image_path = self.image_display_widget.images[idx]["image_path"]
-            image_to_send = self.image_display_widget.images[idx]["image"]
-            
-            # For unsaved images
+            image_entry = self.image_display_widget.images[idx]
+            image_path = image_entry["image_path"]
+            image_to_send = image_entry["image"]
+
             if image_path is None:
-                rectangle_geom = self.image_display_widget.images[idx]["rectangle_geom"]
+                rectangle_geom = image_entry["rectangle_geom"]
                 polygon_coords = rectangle_geom.asPolygon()
                 chip_id = self.logs_db.save_chip(
                     image_path="tmp_image_path.png",
@@ -1523,16 +1735,17 @@ class LibreGeoLensDockWidget(QDockWidget):
                 self.image_display_widget.images[idx]["image_path"] = image_path
                 self.logs_db.update_chip_image_path(chip_id, image_path)
             else:
-                chip_ids_sequence.append(int(ntpath.basename(image_path).split(".")[0].split("_screen")[0]))
+                chip_id = int(ntpath.basename(image_path).split(".")[0].split("_screen")[0])
+                chip_ids_sequence.append(chip_id)
 
-            # Process raw chips if needed
-            if send_raw:
-                chip_modes_sequence.append("raw")
+            chip_mode = "raw" if send_raw else "screen"
+            chip_modes_sequence.append(chip_mode)
+
+            if chip_mode == "raw":
                 raw_image_path = image_path.replace("_screen.png", "_raw.png")
-                
+
                 if not os.path.exists(raw_image_path):
-                    # Raw image doesn't exist yet - need to extract it
-                    rectangle = self.image_display_widget.images[idx]["rectangle_geom"].boundingBox()
+                    rectangle = image_entry["rectangle_geom"].boundingBox()
                     cog_path = ru.find_topmost_cog_feature(rectangle)
                     if cog_path is None:
                         QMessageBox.information(
@@ -1542,11 +1755,10 @@ class LibreGeoLensDockWidget(QDockWidget):
                         )
                         self.reload_current_chat()
                         return
-                        
+
                     drawn_box_geocoords = ru.get_drawn_box_geocoordinates(rectangle, cog_path)
                     chip_width, chip_height = ru.determine_chip_size(drawn_box_geocoords, cog_path)
 
-                    # Hardcoded to OpenAI since we only have OpenAI and Groq and Groq is more permissive
                     if max(chip_width, chip_height) > 2048:
                         reply = QMessageBox.question(
                             self,
@@ -1564,7 +1776,7 @@ class LibreGeoLensDockWidget(QDockWidget):
 
                     center_latitude = (drawn_box_geocoords.yMinimum() + drawn_box_geocoords.yMaximum()) / 2
                     center_longitude = (drawn_box_geocoords.xMinimum() + drawn_box_geocoords.xMaximum()) / 2
-                    
+
                     image_to_send = ru.extract_chip_from_tif_point_in_memory(
                         img_path=cog_path,
                         center_latitude=center_latitude,
@@ -1573,139 +1785,120 @@ class LibreGeoLensDockWidget(QDockWidget):
                         chip_height_px=chip_height
                     )
                     self.save_image_to_logs(image_to_send, chip_ids_sequence[-1], raw=True)
-                
-                # Get image base64 and dimensions
+
                 image_base64, dimensions = self.load_image_base64_downscale_if_needed(raw_image_path, selected_api)
                 chips_original_resolutions.append(dimensions["original"])
                 chips_actual_resolutions.append(dimensions["final"])
-                
-                self.conversation[-1]["content"].append(
+                user_message["content"].append(
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
                 )
             else:
-                chip_modes_sequence.append("screen")
-                
-                # Get image base64 and dimensions
                 image_base64, dimensions = self.load_image_base64_downscale_if_needed(image_path, selected_api)
                 chips_original_resolutions.append(dimensions["original"])
                 chips_actual_resolutions.append(dimensions["final"])
-                
-                self.conversation[-1]["content"].append(
+                user_message["content"].append(
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
                 )
-            
-            # Create image thumbnail HTML - use file:// URL instead of base64 to reduce HTML size
-            normalized_path = image_path.replace("\\", "/")
-            image_html = (
-                f'<div style="position: relative; display: inline-block;">'
-                f'    <a href="image://{normalized_path}" style="text-decoration: none;">'
-                f'        <img src="file:///{normalized_path}" width="75" loading="lazy"/>'
-                f'    </a>'
-                f'    <span style="position: absolute; top: 3px; right: 5px; color: {self.text_color}; font-size: 10px">'
-                f'        ({"Raw" if send_raw else "Screen"} Chip)'
-                f'    </span>'
-                f'</div>'
-            )
-            image_html_list.append(image_html)
-        
-        # Update UI with all content at once
-        current_html = self.chat_history.toHtml()
-        # Append user message and all images
-        all_content_html = current_html + user_html + ''.join(image_html_list)
-        self.chat_history.setHtml(all_content_html)
-        self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
+
+            normalized_path = self._normalize_path(image_path)
+            resolution_text = self._format_resolution_text(dimensions["original"], dimensions["final"])
+            chips_display.append({
+                "image_path": normalized_path,
+                "mode_label": "Raw" if chip_mode == "raw" else "Screen",
+                "resolution_text": resolution_text,
+            })
+
+        entry = {
+            "display_id": str(uuid.uuid4()),
+            "db_id": None,
+            "prompt": prompt,
+            "chips": chips_display,
+            "mllm_service": selected_api,
+            "mllm_model": selected_model,
+            "response": "",
+            "response_stream": "",
+            "reasoning": None,
+            "reasoning_stream": "",
+            "reasoning_visible": False,
+            "is_pending": True,
+            "has_reasoning": False,
+        }
+        self.rendered_interactions.append(entry)
+        self.render_chat_history()
         QApplication.processEvents()
 
-        # Stream the response dynamically
-        accumulated_text = f"<b>{selected_model} ({selected_api}):</b> "
-        full_html = self.chat_history.toHtml()
-
-        # Use an efficient buffer for accumulating large responses
-        response_buffer = []
-
-        # Process the conversation to convert any local image paths to base64
         processed_conversation = []
         for message in self.conversation:
             processed_message = {"role": message["role"]}
-            
+
             if message["role"] == "assistant":
                 processed_message["content"] = message["content"]
                 processed_conversation.append(processed_message)
                 continue
-                
+
             processed_content = []
             for content in message["content"]:
                 if content.get("type") == "local_image_path":
-                    # Convert local image paths to base64
                     image_path = content["path"]
                     if os.path.exists(image_path):
-                        # Get image base64 and dimensions (we collect dimensions for conversation history, 
-                        # though we don't save them when loading past conversations since they're already saved)
-                        image_base64, dimensions = self.load_image_base64_downscale_if_needed(image_path, selected_api)
+                        image_base64, _ = self.load_image_base64_downscale_if_needed(image_path, selected_api)
                         processed_content.append({
                             "type": "image_url",
                             "image_url": {"url": f"data:image/png;base64,{image_base64}"}
                         })
                 else:
                     processed_content.append(content)
-            
+
             processed_message["content"] = processed_content
             processed_conversation.append(processed_message)
-            
-        # Start API call with processed conversation data
+
         stream_supported = api_config.get("supports_streaming", True)
+        entry["response_stream"] = ""
+        entry["reasoning_stream"] = ""
         update_counter = 0
-        update_frequency = 2  # Update UI every N chunks to reduce UI redraws
+        update_frequency = 2
         stream_success = False
         stream_error = None
 
         if stream_supported:
-            try:
+            def stream_once(kwargs):
+                nonlocal update_counter
                 response_stream = litellm.completion(
                     model=selected_model,
                     messages=processed_conversation,
                     stream=True,
-                    **base_completion_kwargs
+                    **kwargs
                 )
                 for chunk in response_stream:
-                    content = self.extract_stream_chunk_content(chunk)
-                    if content is None:
-                        continue
-
-                    response_buffer.append(content)
-                    update_counter += 1
+                    text_chunk, reasoning_chunk = self.parse_stream_chunk(chunk)
+                    if text_chunk:
+                        entry["response_stream"] += text_chunk
+                        update_counter += 1
+                    if reasoning_chunk:
+                        entry["reasoning_stream"] += reasoning_chunk
+                        entry["has_reasoning"] = True
+                        update_counter += 1
 
                     if update_counter >= update_frequency:
-                        accumulated_text += ''.join(response_buffer)
-                        rendered_markdown = markdown.markdown(accumulated_text)
-                        updated_html = full_html + rendered_markdown
-                        self.chat_history.setHtml(updated_html)
-                        self.chat_history.verticalScrollBar().setValue(
-                            self.chat_history.verticalScrollBar().maximum()
-                        )
+                        self.render_chat_history()
                         QApplication.processEvents()
-                        response_buffer = []
                         update_counter = 0
 
+            try:
+                stream_once(base_completion_kwargs)
                 stream_success = True
             except Exception as e:
-                QMessageBox.information(
-                    self.iface.mainWindow(),
-                    "Streaming Error",
-                    str(e)
-                )
-                response_buffer = []
-                accumulated_text = f"<b>{selected_model} ({selected_api}):</b> "
-                self.chat_history.setHtml(full_html)
-                self.chat_history.verticalScrollBar().setValue(
-                    self.chat_history.verticalScrollBar().maximum()
-                )
-                QApplication.processEvents()
+                    stream_error = e
+                    self._handle_stream_failure(entry, e)
 
-        if stream_success and response_buffer:
-            accumulated_text += ''.join(response_buffer)
+        if stream_success and (entry["response_stream"] or entry["reasoning_stream"]):
+            self.render_chat_history()
+            QApplication.processEvents()
 
-        if not stream_success:
+        if stream_success:
+            response_text = entry["response_stream"]
+            reasoning_text = entry["reasoning_stream"]
+        else:
             try:
                 non_stream_response = litellm.completion(
                     model=selected_model,
@@ -1716,20 +1909,22 @@ class LibreGeoLensDockWidget(QDockWidget):
                 if stream_error is not None:
                     raise exc from stream_error
                 raise
-            content_text = self.extract_completion_text(non_stream_response)
-            accumulated_text += content_text
+            response_text, reasoning_text = self.parse_completion_response(non_stream_response)
+            entry["response_stream"] = response_text
+            entry["reasoning_stream"] = reasoning_text or ""
+            entry["has_reasoning"] = bool(reasoning_text)
 
-        response = accumulated_text.replace(
-            f"<b>{selected_model} ({selected_api}):</b> ", ""
-        )
-        rendered_markdown = markdown.markdown(accumulated_text)
-        final_html = full_html + rendered_markdown
-        self.chat_history.setHtml(final_html)
-        self.chat_history.verticalScrollBar().setValue(
-            self.chat_history.verticalScrollBar().maximum()
-        )
+        entry["response"] = response_text or ""
+        entry["reasoning"] = reasoning_text if reasoning_text else None
+        entry["response_stream"] = ""
+        entry["reasoning_stream"] = ""
+        entry["is_pending"] = False
+        entry["has_reasoning"] = bool(reasoning_text)
+        self.render_chat_history()
         QApplication.processEvents()
 
+        response = entry["response"]
+        reasoning_to_persist = entry["reasoning"]
         self.conversation.append({"role": "assistant", "content": response})
         interaction_id = self.logs_db.save_interaction(
             text_input=prompt, text_output=response,
@@ -1737,12 +1932,18 @@ class LibreGeoLensDockWidget(QDockWidget):
             mllm_service=selected_api, mllm_model=selected_model,
             chips_mode_sequence=chip_modes_sequence,
             chips_original_resolutions=chips_original_resolutions,
-            chips_actual_resolutions=chips_actual_resolutions
+            chips_actual_resolutions=chips_actual_resolutions,
+            reasoning_output=reasoning_to_persist
         )
+        entry["db_id"] = interaction_id
         self.logs_db.add_new_interaction_to_chat(self.current_chat_id, interaction_id)
 
         summary_text = ""
         try:
+            summary_kwargs = dict(base_completion_kwargs)
+            # TODO: Avoid reasoning at all costs
+            if litellm.supports_reasoning(selected_model):
+                summary_kwargs["reasoning_effort"] = "minimal"
             summary_response = litellm.completion(
                 model=selected_model,
                 messages=[
@@ -1750,7 +1951,7 @@ class LibreGeoLensDockWidget(QDockWidget):
                         f"Summarize the following in 10 words or less: {self.chat_history.toPlainText()}."
                         f" Only respond with your summary."}]}
                 ],
-                **base_completion_kwargs
+                **summary_kwargs
             )
             summary_text = self.extract_completion_text(summary_response).strip()
         except Exception as exc:
@@ -1771,13 +1972,17 @@ class LibreGeoLensDockWidget(QDockWidget):
                 interactions = feat_attrs[0]
                 if type(interactions) == str:
                     interactions = json.loads(interactions)
+                interaction_payload = {"prompt": prompt, "response": response}
+                if reasoning_to_persist:
+                    interaction_payload["reasoning"] = reasoning_to_persist
+
                 if len(interactions) > 0:
-                    interactions[interaction_id] = {"prompt": prompt, "response": response}
+                    interactions[interaction_id] = interaction_payload
                     self.log_layer.dataProvider().changeAttributeValues({
                         feature.id(): {0: json.dumps(interactions)}
                     })
                 else:
-                    interactions[interaction_id] = {"prompt": prompt, "response": response}
+                    interactions[interaction_id] = interaction_payload
                     self.image_display_widget.images[idx]["chip_id"] = chip_ids_sequence[idx]
                     self.log_layer.dataProvider().changeAttributeValues({
                         feature.id(): {0: json.dumps(interactions),
@@ -1933,7 +2138,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         # Collect all chips used in this chat
         all_chip_ids = []
         for interaction_id in interactions_sequence:
-            (_, _, _, chip_ids, _, _, chip_modes, _, _) = self.logs_db.fetch_interaction_by_id(interaction_id)
+            (_, _, _, chip_ids, _, _, chip_modes, _, _, _) = self.logs_db.fetch_interaction_by_id(interaction_id)
             all_chip_ids.extend(json.loads(chip_ids))
         
         # Copy all chip images to the export folder
@@ -2051,6 +2256,21 @@ class LibreGeoLensDockWidget(QDockWidget):
             border-radius: 3px;
             font-size: 12px;
         }
+        details.reasoning-block {
+            margin-bottom: 15px;
+        }
+        details.reasoning-block summary {
+            font-weight: 600;
+            cursor: pointer;
+        }
+        details.reasoning-block[open] summary {
+            margin-bottom: 6px;
+        }
+        .reasoning-body {
+            background-color: #f9f9f9;
+            border-left: 3px solid #aaa;
+            padding: 8px 12px;
+        }
         .footer {
             text-align: center;
             margin-top: 30px;
@@ -2070,7 +2290,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         # Add each interaction to the HTML
         for interaction_id in interactions_sequence:
             (_, prompt, response, chip_ids, mllm_service, mllm_model, chip_modes,
-             original_resolutions, actual_resolutions) = self.logs_db.fetch_interaction_by_id(interaction_id)
+             original_resolutions, actual_resolutions, reasoning_output) = self.logs_db.fetch_interaction_by_id(interaction_id)
             
             # User message
             html += f'<div class="user-message">\n<strong>User:</strong> {prompt}\n</div>\n'
@@ -2124,7 +2344,24 @@ class LibreGeoLensDockWidget(QDockWidget):
                 html += '</div>\n'
             
             # Assistant response
-            html += f'<div class="assistant-message">\n<strong>{mllm_model} ({mllm_service}):</strong> {markdown.markdown(response)}\n</div>\n'
+            html += (
+                f'<div class="assistant-message">\n'
+                f'<strong>{mllm_model} ({mllm_service}):</strong> {markdown.markdown(response)}\n'
+                f'</div>\n'
+            )
+
+            normalized_reasoning = reasoning_output if reasoning_output not in (None, "", "None") else None
+            if normalized_reasoning:
+                reasoning_body = markdown.markdown(normalized_reasoning)
+            else:
+                reasoning_body = "<p><em>Reasoning content not available.</em></p>"
+
+            html += (
+                '<details class="reasoning-block">\n'
+                '    <summary>Reasoning</summary>\n'
+                f'    <div class="reasoning-body">{reasoning_body}</div>\n'
+                '</details>\n'
+            )
         
         # HTML footer
         html += """    </div>

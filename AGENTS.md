@@ -14,6 +14,8 @@ Repo-level `resources/media/` stores demo assets used by the README.
 ## Build, Test, and Development Commands
 Do not handle this yourself since there's not automated testing. Testing must be done manually and visually by the user.
 
+Do not try running any python commands. It won't work.
+
 ## Coding Style & Naming Conventions
 Use 4-space indentation and snake_case for functions and module-level names; keep Qt widget classes in PascalCase(see `dock.py`).
 
