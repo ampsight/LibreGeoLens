@@ -19,6 +19,7 @@ import urllib.parse
 import ast
 import requests
 import litellm
+import traceback
 
 from .settings import SettingsDialog
 from .db import LogsDB
@@ -28,7 +29,7 @@ from .custom_qt import (zoom_to_and_flash_feature, CustomTextBrowser, ImageDispl
 
 from qgis.PyQt.QtGui import QPixmap, QImage, QColor, QTextOption, QPalette
 from qgis.PyQt.QtCore import (QBuffer, QByteArray, Qt, QSettings, QVariant, QSize, QTimer, QSignalBlocker,
-                              QObject, QThread, pyqtSignal)
+                              QObject, QThread, pyqtSignal, pyqtSlot)
 from qgis.PyQt.QtWidgets import (QSizePolicy, QFileDialog, QMessageBox, QInputDialog, QComboBox, QLabel, QVBoxLayout,
                                  QPushButton, QWidget, QTextEdit, QApplication, QRadioButton, QHBoxLayout, QDockWidget,
                                  QSplitter, QListWidget, QListWidgetItem, QDialog, QTextBrowser, QCheckBox)
@@ -61,49 +62,62 @@ class MLLMStreamWorker(QObject):
         stream_success = False
         stream_error = None
 
-        if self.stream_supported:
-            try:
-                response_stream = litellm.completion(
-                    model=self.model,
-                    messages=self.messages,
-                    stream=True,
-                    **self.base_kwargs
-                )
-                for chunk in response_stream:
-                    text_chunk, reasoning_chunk = self.parse_stream_chunk(chunk)
-                    if text_chunk:
-                        response_text += text_chunk
-                    if reasoning_chunk:
-                        reasoning_text += reasoning_chunk
-                    if text_chunk or reasoning_chunk:
-                        self.chunk_received.emit(text_chunk, reasoning_chunk)
-                stream_success = True
-            except Exception as error:
-                stream_error = error
-                self.stream_failed.emit(error)
+        try:
+            if self.stream_supported:
+                try:
+                    response_stream = litellm.completion(
+                        model=self.model,
+                        messages=self.messages,
+                        stream=True,
+                        **self.base_kwargs
+                    )
+                    for chunk in response_stream:
+                        text_chunk, reasoning_chunk = self.parse_stream_chunk(chunk)
+                        if text_chunk:
+                            response_text += text_chunk
+                        if reasoning_chunk:
+                            reasoning_text += reasoning_chunk
+                        if text_chunk or reasoning_chunk:
+                            self.chunk_received.emit(text_chunk, reasoning_chunk)
+                    stream_success = True
+                except Exception as error:
+                    stream_error = error
+                    self.stream_failed.emit({
+                        "error": error,
+                        "traceback": traceback.format_exc(),
+                    })
 
-        if not stream_success:
-            try:
-                non_stream_response = litellm.completion(
-                    model=self.model,
-                    messages=self.messages,
-                    **self.base_kwargs
-                )
-            except Exception as exc:
-                error_payload = {"stream_error": stream_error, "final_error": exc}
-                self.failed.emit(error_payload)
-                self.done.emit()
-                return
+            if not stream_success:
+                try:
+                    non_stream_response = litellm.completion(
+                        model=self.model,
+                        messages=self.messages,
+                        **self.base_kwargs
+                    )
+                except Exception as exc:
+                    error_payload = {
+                        "stream_error": stream_error,
+                        "final_error": exc,
+                        "traceback": traceback.format_exc(),
+                    }
+                    self.failed.emit(error_payload)
+                    return
 
-            response_text, reasoning_text = self.parse_completion_response(non_stream_response)
+                response_text, reasoning_text = self.parse_completion_response(non_stream_response)
 
-        self.completed.emit({
-            "response_text": response_text or "",
-            "reasoning_text": reasoning_text or "",
-            "stream_success": stream_success,
-            "stream_error": stream_error,
-        })
-        self.done.emit()
+            self.completed.emit({
+                "response_text": response_text or "",
+                "reasoning_text": reasoning_text or "",
+                "stream_success": stream_success,
+                "stream_error": stream_error,
+            })
+        except Exception as exc:
+            self.failed.emit({
+                "unexpected_error": exc,
+                "traceback": traceback.format_exc(),
+            })
+        finally:
+            self.done.emit()
 
 
 class LibreGeoLensDockWidget(QDockWidget):
@@ -1628,10 +1642,27 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.reasoning_effort_label.setEnabled(supported)
 
     def _handle_stream_failure(self, entry, error):
+        traceback_text = None
+        message = "Streaming failed."
+        if isinstance(error, dict):
+            message_candidate = error.get("error") or error.get("message") or message
+            message = str(message_candidate).strip()
+            if not message:
+                if isinstance(message_candidate, str) and message_candidate.strip():
+                    message = message_candidate.strip()
+                else:
+                    message = "Streaming failed."
+            traceback_text = error.get("traceback")
+        elif error:
+            message = str(error).strip() or "Streaming failed."
+
+        if traceback_text:
+            print(f"LibreGeoLens streaming error: {traceback_text}")
+
         QMessageBox.information(
             self.iface.mainWindow(),
             "Streaming Error",
-            str(error)
+            message
         )
         entry["response_stream"] = ""
         entry["reasoning_stream"] = ""
@@ -2002,21 +2033,13 @@ class LibreGeoLensDockWidget(QDockWidget):
         request_context["thread"] = thread
         self.active_streams[entry_id] = request_context
 
-        worker.chunk_received.connect(
-            lambda text, reasoning, eid=entry_id: self._handle_stream_chunk(eid, text, reasoning)
-        )
-        worker.stream_failed.connect(
-            lambda error, eid=entry_id: self._on_stream_failed(eid, error)
-        )
-        worker.completed.connect(
-            lambda payload, eid=entry_id: self._on_stream_completed(eid, payload)
-        )
-        worker.failed.connect(
-            lambda payload, eid=entry_id: self._on_stream_error(eid, payload)
-        )
+        worker.chunk_received.connect(self._worker_chunk_received)
+        worker.stream_failed.connect(self._worker_stream_failed)
+        worker.completed.connect(self._worker_completed)
+        worker.failed.connect(self._worker_failed)
         worker.done.connect(thread.quit)
         worker.done.connect(
-            lambda eid=entry_id: self._on_stream_done(eid)
+            self._worker_done
         )
         worker.done.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -2044,6 +2067,123 @@ class LibreGeoLensDockWidget(QDockWidget):
             updated = True
         if updated:
             self.render_chat_history()
+
+    def _handle_unexpected_exception(self, error, context="", traceback_text=None, *, show_dialog=True):
+        message = str(error) if error else "An unexpected error occurred."
+        title = "LibreGeoLens Error"
+        if context:
+            title = f"{title} ({context})"
+
+        details = traceback_text or traceback.format_exc()
+        if details:
+            if context:
+                print(f"LibreGeoLens error in {context}:\n{details}")
+            else:
+                print(f"LibreGeoLens error:\n{details}")
+
+        if show_dialog:
+            QMessageBox.critical(self.iface.mainWindow(), title, message)
+
+    def _find_entry_id_for_worker(self, worker):
+        for entry_id, ctx in self.active_streams.items():
+            if ctx.get("worker") is worker:
+                return entry_id
+        return None
+
+    def _dispatch_worker_callback(self, callback, entry_id, *args, propagate_error=True):
+        try:
+            callback(entry_id, *args)
+        except Exception as exc:
+            callback_name = getattr(callback, "__name__", repr(callback))
+            traceback_text = traceback.format_exc()
+            self._handle_unexpected_exception(
+                exc,
+                context=callback_name,
+                traceback_text=traceback_text,
+                show_dialog=not propagate_error,
+            )
+
+            if not propagate_error or entry_id is None:
+                return
+
+            payload = {
+                "final_error": exc,
+                "traceback": traceback_text,
+            }
+            try:
+                self._on_stream_error(entry_id, payload)
+            except Exception as inner_exc:
+                inner_trace = traceback.format_exc()
+                self._handle_unexpected_exception(
+                    inner_exc,
+                    context="_on_stream_error",
+                    traceback_text=inner_trace,
+                )
+
+    @pyqtSlot(object, object)
+    def _worker_chunk_received(self, text_chunk, reasoning_chunk):
+        worker = self.sender()
+        entry_id = self._find_entry_id_for_worker(worker)
+        if entry_id is None:
+            return
+        self._dispatch_worker_callback(
+            self._handle_stream_chunk,
+            entry_id,
+            text_chunk,
+            reasoning_chunk,
+        )
+
+    @pyqtSlot(object)
+    def _worker_stream_failed(self, error):
+        worker = self.sender()
+        entry_id = self._find_entry_id_for_worker(worker)
+        if entry_id is None:
+            return
+        entry = self._get_rendered_entry(entry_id)
+        if not entry:
+            return
+        try:
+            self._handle_stream_failure(entry, error)
+        except Exception as exc:
+            traceback_text = traceback.format_exc()
+            self._handle_unexpected_exception(exc, context="_handle_stream_failure", traceback_text=traceback_text)
+
+    @pyqtSlot(object)
+    def _worker_completed(self, payload):
+        worker = self.sender()
+        entry_id = self._find_entry_id_for_worker(worker)
+        if entry_id is None:
+            return
+        self._dispatch_worker_callback(
+            self._on_stream_completed,
+            entry_id,
+            payload,
+        )
+
+    @pyqtSlot(object)
+    def _worker_failed(self, payload):
+        worker = self.sender()
+        entry_id = self._find_entry_id_for_worker(worker)
+        if entry_id is None:
+            return
+        self._dispatch_worker_callback(
+            self._on_stream_error,
+            entry_id,
+            payload,
+            propagate_error=False,
+        )
+
+    @pyqtSlot()
+    def _worker_done(self):
+        worker = self.sender()
+        entry_id = self._find_entry_id_for_worker(worker)
+        if entry_id is None:
+            return
+        self._dispatch_worker_callback(
+            self._on_stream_done,
+            entry_id,
+            propagate_error=False,
+        )
 
     def _on_stream_failed(self, entry_id, error):
         entry = self._get_rendered_entry(entry_id)
@@ -2073,8 +2213,17 @@ class LibreGeoLensDockWidget(QDockWidget):
     def _on_stream_error(self, entry_id, error_payload):
         context = self.active_streams.get(entry_id)
         final_error = None
+        stream_error = None
+        unexpected_error = None
+        traceback_text = None
+
         if isinstance(error_payload, dict):
             final_error = error_payload.get("final_error")
+            stream_error = error_payload.get("stream_error")
+            unexpected_error = error_payload.get("unexpected_error")
+            traceback_text = error_payload.get("traceback")
+        elif isinstance(error_payload, Exception):
+            final_error = error_payload
         entry = self._get_rendered_entry(entry_id)
 
         if context:
@@ -2087,7 +2236,16 @@ class LibreGeoLensDockWidget(QDockWidget):
 
         self.render_chat_history()
 
-        message = str(final_error) if final_error else "An error occurred while completing the request."
+        message = (
+            str(final_error)
+            or str(unexpected_error)
+            or str(stream_error)
+            or "An error occurred while completing the request."
+        )
+
+        if traceback_text:
+            print(f"LibreGeoLens interaction error: {traceback_text}")
+
         QMessageBox.warning(self.iface.mainWindow(), "Error", message)
         self._cleanup_active_stream(entry_id, context)
         self.reload_current_chat()
