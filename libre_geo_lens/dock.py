@@ -27,7 +27,8 @@ from .custom_qt import (zoom_to_and_flash_feature, CustomTextBrowser, ImageDispl
                         AreaDrawingTool, IdentifyDrawnAreaTool)
 
 from qgis.PyQt.QtGui import QPixmap, QImage, QColor, QTextOption, QPalette
-from qgis.PyQt.QtCore import QBuffer, QByteArray, Qt, QSettings, QVariant, QSize, QTimer, QSignalBlocker
+from qgis.PyQt.QtCore import (QBuffer, QByteArray, Qt, QSettings, QVariant, QSize, QTimer, QSignalBlocker,
+                              QObject, QThread, pyqtSignal)
 from qgis.PyQt.QtWidgets import (QSizePolicy, QFileDialog, QMessageBox, QInputDialog, QComboBox, QLabel, QVBoxLayout,
                                  QPushButton, QWidget, QTextEdit, QApplication, QRadioButton, QHBoxLayout, QDockWidget,
                                  QSplitter, QListWidget, QListWidgetItem, QDialog, QTextBrowser, QCheckBox)
@@ -35,6 +36,74 @@ from qgis.core import (QgsVectorLayer, QgsRasterLayer, QgsSymbol, QgsSimpleLineS
                        QgsRectangle, QgsWkbTypes, QgsProject, QgsGeometry, QgsMapRendererParallelJob, QgsFeature,
                        QgsField, QgsVectorFileWriter, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
                        QgsFeatureRequest, QgsLayerTreeLayer)
+
+
+class MLLMStreamWorker(QObject):
+    chunk_received = pyqtSignal(object, object)
+    stream_failed = pyqtSignal(object)
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(object)
+    done = pyqtSignal()
+
+    def __init__(self, model, messages, base_kwargs, stream_supported,
+                 parse_stream_chunk, parse_completion_response, parent=None):
+        super().__init__(parent)
+        self.model = model
+        self.messages = messages
+        self.base_kwargs = base_kwargs
+        self.stream_supported = stream_supported
+        self.parse_stream_chunk = parse_stream_chunk
+        self.parse_completion_response = parse_completion_response
+
+    def run(self):
+        response_text = ""
+        reasoning_text = ""
+        stream_success = False
+        stream_error = None
+
+        if self.stream_supported:
+            try:
+                response_stream = litellm.completion(
+                    model=self.model,
+                    messages=self.messages,
+                    stream=True,
+                    **self.base_kwargs
+                )
+                for chunk in response_stream:
+                    text_chunk, reasoning_chunk = self.parse_stream_chunk(chunk)
+                    if text_chunk:
+                        response_text += text_chunk
+                    if reasoning_chunk:
+                        reasoning_text += reasoning_chunk
+                    if text_chunk or reasoning_chunk:
+                        self.chunk_received.emit(text_chunk, reasoning_chunk)
+                stream_success = True
+            except Exception as error:
+                stream_error = error
+                self.stream_failed.emit(error)
+
+        if not stream_success:
+            try:
+                non_stream_response = litellm.completion(
+                    model=self.model,
+                    messages=self.messages,
+                    **self.base_kwargs
+                )
+            except Exception as exc:
+                error_payload = {"stream_error": stream_error, "final_error": exc}
+                self.failed.emit(error_payload)
+                self.done.emit()
+                return
+
+            response_text, reasoning_text = self.parse_completion_response(non_stream_response)
+
+        self.completed.emit({
+            "response_text": response_text or "",
+            "reasoning_text": reasoning_text or "",
+            "stream_success": stream_success,
+            "stream_error": stream_error,
+        })
+        self.done.emit()
 
 
 class LibreGeoLensDockWidget(QDockWidget):
@@ -49,6 +118,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.current_chat_id = None
         self.conversation = []
         self.rendered_interactions = []
+        self.active_streams = {}
         self.help_dialog = None
         self.info_dialog = None
 
@@ -691,34 +761,30 @@ class LibreGeoLensDockWidget(QDockWidget):
                     f'</div>'
                 )
 
+            assistant_turn_start_text = f"**{entry['mllm_model']} ({entry['mllm_service']}):**"
+
             response_text = entry.get("response_stream") if entry.get("is_pending") else entry.get("response", "")
             response_text = response_text or ""
-
-            if response_text:
-                assistant_markdown = markdown.markdown(
-                    f"**{entry['mllm_model']} ({entry['mllm_service']}):** {response_text}"
-                )
-            else:
-                assistant_markdown = markdown.markdown(
-                    f"**{entry['mllm_model']} ({entry['mllm_service']}):**"
-                )
-
-            html_parts.append(
-                f'<div id="interaction-{entry["display_id"]}-response">{assistant_markdown}</div>'
-            )
 
             if litellm.supports_reasoning(entry['mllm_model']):
                 toggle_label = "Hide reasoning" if entry.get("reasoning_visible") else "Show reasoning"
                 html_parts.append(
-                    f'<div style="margin: 4px 0;">'
+                    f'<div style="margin: 4px 0;"> {markdown.markdown(assistant_turn_start_text)}'
                     f'    <a href="toggle://reasoning/{entry["display_id"]}" style="text-decoration: none;">'
                     f'{toggle_label}'
                     f'    </a>'
                     f'</div>'
                 )
-
+                assistant_turn_start_text = ""
                 if entry.get("reasoning_visible"):
                     html_parts.append(self._build_reasoning_html(entry))
+
+            if response_text:
+                assistant_markdown = markdown.markdown(f"{assistant_turn_start_text} {response_text}")
+            else:
+                assistant_markdown = markdown.markdown(assistant_turn_start_text)
+
+            html_parts.append(f'<div>{assistant_markdown}</div>')
 
         html = ''.join(html_parts)
         self.chat_history.setHtml(html)
@@ -728,7 +794,8 @@ class LibreGeoLensDockWidget(QDockWidget):
                 self.chat_history.verticalScrollBar().maximum()
             )
 
-    def _build_reasoning_html(self, entry):
+    @staticmethod
+    def _build_reasoning_html(entry):
         reasoning_text = entry.get("reasoning_stream") if entry.get("is_pending") else entry.get("reasoning")
         reasoning_text = reasoning_text or ""
 
@@ -1906,65 +1973,133 @@ class LibreGeoLensDockWidget(QDockWidget):
         stream_supported = api_config.get("supports_streaming", True)
         entry["response_stream"] = ""
         entry["reasoning_stream"] = ""
-        update_counter = 0
-        update_frequency = 2
-        stream_success = False
-        stream_error = None
 
-        if stream_supported:
-            def stream_once(kwargs):
-                nonlocal update_counter
-                response_stream = litellm.completion(
-                    model=selected_model,
-                    messages=processed_conversation,
-                    stream=True,
-                    **kwargs
-                )
-                for chunk in response_stream:
-                    text_chunk, reasoning_chunk = self.parse_stream_chunk(chunk)
-                    if text_chunk:
-                        entry["response_stream"] += text_chunk
-                        update_counter += 1
-                    if reasoning_chunk:
-                        entry["reasoning_stream"] += reasoning_chunk
-                        entry["has_reasoning"] = True
-                        update_counter += 1
+        entry_id = entry["display_id"]
+        request_context = {
+            "prompt": prompt,
+            "selected_api": selected_api,
+            "selected_model": selected_model,
+            "chip_ids_sequence": chip_ids_sequence,
+            "chip_modes_sequence": chip_modes_sequence,
+            "chips_original_resolutions": chips_original_resolutions,
+            "chips_actual_resolutions": chips_actual_resolutions,
+            "n_images": n_images,
+            "user_message_index": len(self.conversation) - 1,
+        }
 
-                    if update_counter >= update_frequency:
-                        self.render_chat_history()
-                        QApplication.processEvents()
-                        update_counter = 0
+        worker = MLLMStreamWorker(
+            selected_model,
+            processed_conversation,
+            base_completion_kwargs,
+            stream_supported,
+            self.parse_stream_chunk,
+            self.parse_completion_response
+        )
+        thread = QThread()
+        worker.moveToThread(thread)
 
-            try:
-                stream_once(base_completion_kwargs)
-                stream_success = True
-            except Exception as e:
-                    stream_error = e
-                    self._handle_stream_failure(entry, e)
+        request_context["worker"] = worker
+        request_context["thread"] = thread
+        self.active_streams[entry_id] = request_context
 
-        if stream_success and (entry["response_stream"] or entry["reasoning_stream"]):
+        worker.chunk_received.connect(
+            lambda text, reasoning, eid=entry_id: self._handle_stream_chunk(eid, text, reasoning)
+        )
+        worker.stream_failed.connect(
+            lambda error, eid=entry_id: self._on_stream_failed(eid, error)
+        )
+        worker.completed.connect(
+            lambda payload, eid=entry_id: self._on_stream_completed(eid, payload)
+        )
+        worker.failed.connect(
+            lambda payload, eid=entry_id: self._on_stream_error(eid, payload)
+        )
+        worker.done.connect(thread.quit)
+        worker.done.connect(
+            lambda eid=entry_id: self._on_stream_done(eid)
+        )
+        worker.done.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        thread.started.connect(worker.run)
+        thread.start()
+
+    def _get_rendered_entry(self, entry_id):
+        for entry in self.rendered_interactions:
+            if entry.get("display_id") == entry_id:
+                return entry
+        return None
+
+    def _handle_stream_chunk(self, entry_id, text_chunk, reasoning_chunk):
+        entry = self._get_rendered_entry(entry_id)
+        if not entry:
+            return
+        updated = False
+        if text_chunk:
+            entry["response_stream"] += text_chunk
+            updated = True
+        if reasoning_chunk:
+            entry["reasoning_stream"] += reasoning_chunk
+            entry["has_reasoning"] = True
+            updated = True
+        if updated:
             self.render_chat_history()
-            QApplication.processEvents()
+
+    def _on_stream_failed(self, entry_id, error):
+        entry = self._get_rendered_entry(entry_id)
+        if entry:
+            self._handle_stream_failure(entry, error)
+
+    def _on_stream_completed(self, entry_id, payload):
+        entry = self._get_rendered_entry(entry_id)
+        context = self.active_streams.get(entry_id)
+        if not entry or context is None:
+            return
+
+        stream_success = bool(payload.get("stream_success"))
+        response_text = payload.get("response_text") or ""
+        reasoning_text = payload.get("reasoning_text") or ""
 
         if stream_success:
-            response_text = entry["response_stream"]
-            reasoning_text = entry["reasoning_stream"]
+            response_text = entry.get("response_stream", "") or response_text
+            reasoning_text = entry.get("reasoning_stream", "") or reasoning_text
         else:
-            try:
-                non_stream_response = litellm.completion(
-                    model=selected_model,
-                    messages=processed_conversation,
-                    **base_completion_kwargs
-                )
-            except Exception as exc:
-                if stream_error is not None:
-                    raise exc from stream_error
-                raise
-            response_text, reasoning_text = self.parse_completion_response(non_stream_response)
             entry["response_stream"] = response_text
-            entry["reasoning_stream"] = reasoning_text or ""
+            entry["reasoning_stream"] = reasoning_text
             entry["has_reasoning"] = bool(reasoning_text)
 
+        self._finalize_interaction(entry_id, entry, context, response_text, reasoning_text)
+
+    def _on_stream_error(self, entry_id, error_payload):
+        context = self.active_streams.get(entry_id)
+        final_error = None
+        if isinstance(error_payload, dict):
+            final_error = error_payload.get("final_error")
+        entry = self._get_rendered_entry(entry_id)
+
+        if context:
+            user_idx = context.get("user_message_index")
+            if user_idx is not None and 0 <= user_idx < len(self.conversation):
+                self.conversation = self.conversation[:user_idx]
+
+        if entry and entry in self.rendered_interactions:
+            self.rendered_interactions.remove(entry)
+
+        self.render_chat_history()
+
+        message = str(final_error) if final_error else "An error occurred while completing the request."
+        QMessageBox.warning(self.iface.mainWindow(), "Error", message)
+        self._cleanup_active_stream(entry_id, context)
+        self.reload_current_chat()
+
+    def _on_stream_done(self, entry_id):
+        context = self.active_streams.get(entry_id)
+        if not context:
+            return
+        context.pop("worker", None)
+        context.pop("thread", None)
+
+    def _finalize_interaction(self, entry_id, entry, context, response_text, reasoning_text):
         entry["response"] = response_text or ""
         entry["reasoning"] = reasoning_text if reasoning_text else None
         entry["response_stream"] = ""
@@ -1972,29 +2107,31 @@ class LibreGeoLensDockWidget(QDockWidget):
         entry["is_pending"] = False
         entry["has_reasoning"] = bool(reasoning_text)
         self.render_chat_history()
-        QApplication.processEvents()
 
         response = entry["response"]
         reasoning_to_persist = entry["reasoning"]
         self.conversation.append({"role": "assistant", "content": response})
+
         interaction_id = self.logs_db.save_interaction(
-            text_input=prompt, text_output=response,
-            chips_sequence=chip_ids_sequence,
-            mllm_service=selected_api, mllm_model=selected_model,
-            chips_mode_sequence=chip_modes_sequence,
-            chips_original_resolutions=chips_original_resolutions,
-            chips_actual_resolutions=chips_actual_resolutions,
+            text_input=context["prompt"],
+            text_output=response,
+            chips_sequence=context["chip_ids_sequence"],
+            mllm_service=context["selected_api"],
+            mllm_model=context["selected_model"],
+            chips_mode_sequence=context["chip_modes_sequence"],
+            chips_original_resolutions=context["chips_original_resolutions"],
+            chips_actual_resolutions=context["chips_actual_resolutions"],
             reasoning_output=reasoning_to_persist
         )
         entry["db_id"] = interaction_id
         self.logs_db.add_new_interaction_to_chat(self.current_chat_id, interaction_id)
 
         summary_text = ""
-        summary_api = selected_api
-        summary_model = selected_model
+        summary_api = context["selected_api"]
+        summary_model = context["selected_model"]
         try:
             summary_api, summary_model, summary_kwargs, needs_reasoning = self.select_summary_model(
-                selected_api, selected_model
+                summary_api, summary_model
             )
             if needs_reasoning:
                 summary_kwargs["reasoning_effort"] = "low"
@@ -2017,16 +2154,20 @@ class LibreGeoLensDockWidget(QDockWidget):
             if current_item is not None:
                 current_item.setText(summary_text)
 
+        n_images = context["n_images"]
         for idx in range(n_images):
+            if idx >= len(self.image_display_widget.images):
+                break
+            image_metadata = self.image_display_widget.images[idx]
             request = QgsFeatureRequest().setFilterExpression(
-                f'"ChipId" = \'{self.image_display_widget.images[idx]["chip_id"]}\''
+                f'"ChipId" = \'{image_metadata.get("chip_id", "")}\''
             )
             for feature in self.log_layer.getFeatures(request):
                 feat_attrs = feature.attributes()
                 interactions = feat_attrs[0]
-                if type(interactions) == str:
+                if isinstance(interactions, str):
                     interactions = json.loads(interactions)
-                interaction_payload = {"prompt": prompt, "response": response}
+                interaction_payload = {"prompt": context["prompt"], "response": response}
                 if reasoning_to_persist:
                     interaction_payload["reasoning"] = reasoning_to_persist
 
@@ -2037,13 +2178,16 @@ class LibreGeoLensDockWidget(QDockWidget):
                     })
                 else:
                     interactions[interaction_id] = interaction_payload
-                    self.image_display_widget.images[idx]["chip_id"] = chip_ids_sequence[idx]
+                    image_metadata["chip_id"] = context["chip_ids_sequence"][idx]
                     self.log_layer.dataProvider().changeAttributeValues({
-                        feature.id(): {0: json.dumps(interactions),
-                                       1: self.image_display_widget.images[idx]["image_path"],
-                                       2: self.image_display_widget.images[idx]["chip_id"]}
+                        feature.id(): {
+                            0: json.dumps(interactions),
+                            1: image_metadata.get("image_path"),
+                            2: image_metadata.get("chip_id")
+                        }
                     })
                 break
+
         if n_images > 0:
             self.log_layer.updateExtents()
             self.save_logs_to_geojson()
@@ -2055,8 +2199,18 @@ class LibreGeoLensDockWidget(QDockWidget):
         settings_dialog = SettingsDialog(self.iface.mainWindow())
         settings_dialog.sync_local_logs_dir_with_s3(self.logs_dir)
 
-        # Reload chat to offload in-memory imagery in self.conversation
+        self._cleanup_active_stream(entry_id, context)
+
         self.reload_current_chat()
+
+    def _cleanup_active_stream(self, entry_id, context=None):
+        ctx = context if context is not None else self.active_streams.get(entry_id)
+        self.active_streams.pop(entry_id, None)
+        if not ctx:
+            return
+        thread = ctx.get("thread")
+        if thread and thread.isRunning():
+            thread.quit()
 
     def reload_current_chat(self):
         item = self.chat_list.currentItem()
