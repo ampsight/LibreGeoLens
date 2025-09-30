@@ -17,6 +17,7 @@ from PIL import Image
 import markdown
 import urllib.parse
 import ast
+import re
 import requests
 import litellm
 import traceback
@@ -837,24 +838,25 @@ class LibreGeoLensDockWidget(QDockWidget):
             response_text = response_text or ""
 
             if litellm.supports_reasoning(entry['mllm_model']):
-                toggle_label = "Hide reasoning" if entry.get("reasoning_visible") else "Show reasoning"
                 html_parts.append(
-                    f'<div style="margin: 4px 0;"> {markdown.markdown(assistant_turn_start_text)}'
-                    f'    <a href="toggle://reasoning/{entry["display_id"]}" style="text-decoration: none;">'
-                    f'{toggle_label}'
-                    f'    </a>'
-                    f'</div>'
+                    self._build_reasoning_section_html(entry, assistant_turn_start_text)
                 )
                 assistant_turn_start_text = ""
-                if entry.get("reasoning_visible"):
-                    html_parts.append(self._build_reasoning_html(entry))
 
             if response_text:
-                assistant_markdown = markdown.markdown(f"{assistant_turn_start_text} {response_text}")
+                content_to_render = (
+                    response_text if not assistant_turn_start_text else
+                    f"{assistant_turn_start_text} {response_text}"
+                )
+                assistant_markdown = markdown.markdown(content_to_render)
             else:
-                assistant_markdown = markdown.markdown(assistant_turn_start_text)
+                assistant_markdown = (
+                    markdown.markdown(assistant_turn_start_text)
+                    if assistant_turn_start_text else ""
+                )
 
-            html_parts.append(f'<div>{assistant_markdown}</div>')
+            if assistant_markdown:
+                html_parts.append(f'<div>{assistant_markdown}</div>')
 
         html = ''.join(html_parts)
         scrollbar = self.chat_history.verticalScrollBar()
@@ -884,22 +886,75 @@ class LibreGeoLensDockWidget(QDockWidget):
             self.chat_auto_scroll_enabled = False
 
     @staticmethod
-    def _build_reasoning_html(entry):
+    def _build_reasoning_section_html(entry, assistant_intro_text):
         reasoning_text = entry.get("reasoning_stream") if entry.get("is_pending") else entry.get("reasoning")
         reasoning_text = reasoning_text or ""
 
-        if reasoning_text.strip():
-            reasoning_html = markdown.markdown(reasoning_text)
-        else:
-            if entry.get("is_pending"):
-                reasoning_html = "<p><i>Reasoning content not yet available.</i></p>"
+        def _add_block_styles(html: str) -> str:
+            block_styles = {
+                "p": "margin: 0 0 8px 0;",
+                "ul": "margin: 0 0 8px 18px; padding-left: 18px;",
+                "ol": "margin: 0 0 8px 18px; padding-left: 18px;",
+                "pre": (
+                    "margin: 0 0 8px 0; padding: 8px; border-radius: 4px; "
+                    "background-color: rgba(255, 255, 255, 0.35);"
+                ),
+                "blockquote": (
+                    "margin: 0 0 8px 0; padding-left: 10px; "
+                    "border-left: 3px solid rgba(79, 70, 229, 0.35);"
+                ),
+            }
+
+            pattern = re.compile(r'<(p|ul|ol|pre|blockquote)([^>]*)>')
+
+            def _inject_style(match) -> str:
+                tag = match.group(1)
+                attrs = match.group(2) or ""
+                if "style=" in attrs:
+                    return match.group(0)
+                return f'<{tag}{attrs} style="{block_styles[tag]}">' \
+                    if attrs else f'<{tag} style="{block_styles[tag]}">'
+
+            return pattern.sub(_inject_style, html)
+
+        highlight_styles = "color: #4b5563"
+
+        toggle_styles = (
+            "display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; "
+            "border-radius: 999px; "
+            "color: #4b5563; text-decoration: none; "
+        )
+
+        toggle_label = "Hide reasoning" if entry.get("reasoning_visible") else "Show reasoning"
+        toggle_html = (
+            f'<a href="toggle://reasoning/{entry["display_id"]}" '
+            f'style="{toggle_styles}">{toggle_label}</a>'
+        )
+
+        assistant_html = ""
+        if assistant_intro_text:
+            assistant_html = markdown.markdown(assistant_intro_text)
+
+        body_html = ""
+        if entry.get("reasoning_visible"):
+            if reasoning_text.strip():
+                reasoning_html = markdown.markdown(reasoning_text)
             else:
-                reasoning_html = "<p><i>Reasoning content not available.</i></p>"
+                if entry.get("is_pending"):
+                    reasoning_html = "<p><i>Reasoning content not yet available.</i></p>"
+                else:
+                    reasoning_html = "<p><i>Reasoning content not available.</i></p>"
+
+            reasoning_html = _add_block_styles(reasoning_html)
+            body_html = f'<div style="margin: 0; line-height: 1.55;">{reasoning_html}</div>'
 
         return (
+            '<div style="margin: 4px 0;">'
+            f'<p> <span> {assistant_html} </span> <span style="color: #1f254d;"> {toggle_html} </span> </p>'
             '<div class="reasoning-block" '
-            'style="border-left: 2px solid #ccc; padding: 6px 8px; margin: 4px 0 12px; background-color: #fafafa;">'
-            f'{reasoning_html}'
+            f'style="{highlight_styles}">'
+            f'{body_html}'
+            '</div>'
             '</div>'
         )
 
