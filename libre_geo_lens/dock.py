@@ -1578,6 +1578,57 @@ class LibreGeoLensDockWidget(QDockWidget):
         params = {"reasoning_effort": self.reasoning_effort_combo.currentData()}
         return params
 
+    def _models_for_api(self, api_name):
+        base_models = self.supported_api_clients.get(api_name, {}).get("models", [])
+        added_models = self.added_models.get(api_name, [])
+        return self._deduplicate_preserve_order(base_models + added_models)
+
+    def select_summary_model(self, preferred_api, preferred_model):
+        available_clients = getattr(self, "available_api_clients", {})
+
+        if not available_clients:
+            api_config = self.supported_api_clients.get(preferred_api, {})
+            kwargs = dict(api_config.get("litellm_params", {}))
+            kwargs.update(self.build_auth_params(api_config))
+            needs_reasoning = litellm.supports_reasoning(model=preferred_model)
+            return preferred_api, preferred_model, kwargs, needs_reasoning
+
+        def build_base_kwargs(api_name):
+            api_config = self.supported_api_clients.get(api_name, {})
+            kwargs = dict(api_config.get("litellm_params", {}))
+            kwargs.update(self.build_auth_params(api_config))
+            return kwargs
+
+        if preferred_api in available_clients:
+            if not litellm.supports_reasoning(model=preferred_model):
+                kwargs = build_base_kwargs(preferred_api)
+                return preferred_api, preferred_model, kwargs, False
+
+            for candidate in self._models_for_api(preferred_api):
+                if not litellm.supports_reasoning(model=candidate):
+                    kwargs = build_base_kwargs(preferred_api)
+                    return preferred_api, candidate, kwargs, False
+
+        for api_name in available_clients:
+            if api_name == preferred_api:
+                continue
+            for candidate in self._models_for_api(api_name):
+                if not litellm.supports_reasoning(model=candidate):
+                    kwargs = build_base_kwargs(api_name)
+                    return api_name, candidate, kwargs, False
+
+        fallback_api = preferred_api if preferred_api in available_clients else next(iter(available_clients))
+        fallback_kwargs = build_base_kwargs(fallback_api)
+        fallback_models = self._models_for_api(fallback_api)
+        if fallback_api == preferred_api and preferred_model:
+            fallback_model = preferred_model
+        elif fallback_models:
+            fallback_model = fallback_models[0]
+        else:
+            fallback_model = preferred_model
+
+        needs_reasoning = litellm.supports_reasoning(model=fallback_model)
+        return fallback_api, fallback_model, fallback_kwargs, needs_reasoning
 
     def delete_chat(self):
         """Delete the selected chat after confirmation"""
@@ -1939,13 +1990,16 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.logs_db.add_new_interaction_to_chat(self.current_chat_id, interaction_id)
 
         summary_text = ""
+        summary_api = selected_api
+        summary_model = selected_model
         try:
-            summary_kwargs = dict(base_completion_kwargs)
-            # TODO: Avoid reasoning at all costs
-            if litellm.supports_reasoning(selected_model):
-                summary_kwargs["reasoning_effort"] = "minimal"
+            summary_api, summary_model, summary_kwargs, needs_reasoning = self.select_summary_model(
+                selected_api, selected_model
+            )
+            if needs_reasoning:
+                summary_kwargs["reasoning_effort"] = "low"
             summary_response = litellm.completion(
-                model=selected_model,
+                model=summary_model,
                 messages=[
                     {"role": "user", "content": [{"type": "text", "text":
                         f"Summarize the following in 10 words or less: {self.chat_history.toPlainText()}."
@@ -1955,7 +2009,7 @@ class LibreGeoLensDockWidget(QDockWidget):
             )
             summary_text = self.extract_completion_text(summary_response).strip()
         except Exception as exc:
-            print(f"Failed to generate summary via {selected_api}: {exc}")
+            print(f"Failed to generate summary via {summary_api} ({summary_model}): {exc}")
 
         if summary_text:
             self.logs_db.update_chat_summary(self.current_chat_id, summary_text)

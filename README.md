@@ -38,6 +38,14 @@ enable `Use custom variables` if needed, and add the variables you plan to use:
 Restart QGIS after setting environment variables. You can add additional MLLMs for any configured
 provider from the LibreGeoLens UI (`Add Model` button) without modifying the source code.
 
+#### Conversation Summaries
+
+LibreGeoLens automatically keeps chat titles up to date by requesting a short summary after each assistant response.
+The plugin always prefers a non-reasoning model from the configured providers for this step. When every available
+model supports reasoning only, the summary request uses one of those models but forces the lowest reasoning effort to
+minimize extra latency and cost. You are encouraged to at least configure a provider that already has a non-reasoning model
+enabled by default, or add a non-reasoning model if not using any such providers.
+
 ## Quickstart
 
 1. Make sure you have followed the instructions for the MLLM services above.
