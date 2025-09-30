@@ -288,6 +288,9 @@ class LibreGeoLensDockWidget(QDockWidget):
         # self.chat_history.setToolTip("Chat history - click on image chips to highlight their location on the map")
         main_content_layout.addWidget(self.chat_history, stretch=8)
 
+        self.chat_auto_scroll_enabled = True
+        self.chat_history.verticalScrollBar().valueChanged.connect(self._on_chat_history_scroll)
+
         self.prompt_input = QTextEdit()
         self.prompt_input.setPlaceholderText("Type your prompt here...")
         self.prompt_input.setMinimumHeight(50)
@@ -854,12 +857,31 @@ class LibreGeoLensDockWidget(QDockWidget):
             html_parts.append(f'<div>{assistant_markdown}</div>')
 
         html = ''.join(html_parts)
-        self.chat_history.setHtml(html)
+        scrollbar = self.chat_history.verticalScrollBar()
 
-        if scroll_to_end:
-            self.chat_history.verticalScrollBar().setValue(
-                self.chat_history.verticalScrollBar().maximum()
-            )
+        if scrollbar is not None:
+            previous_value = scrollbar.value()
+            with QSignalBlocker(scrollbar):
+                self.chat_history.setHtml(html)
+                if scroll_to_end and self.chat_auto_scroll_enabled:
+                    scrollbar.setValue(scrollbar.maximum())
+                else:
+                    # Keep the previous manual position, clamped to the new scroll bounds.
+                    scrollbar.setValue(min(previous_value, scrollbar.maximum()))
+        else:
+            self.chat_history.setHtml(html)
+
+    def _on_chat_history_scroll(self, _):
+        scrollbar = self.chat_history.verticalScrollBar()
+        if scrollbar is None:
+            return
+
+        if scrollbar.maximum() == 0:
+            # No scrolling available; nothing to change.
+            return
+
+        if self.chat_auto_scroll_enabled:
+            self.chat_auto_scroll_enabled = False
 
     @staticmethod
     def _build_reasoning_html(entry):
@@ -2026,6 +2048,7 @@ class LibreGeoLensDockWidget(QDockWidget):
             "has_reasoning": False,
         }
         self.rendered_interactions.append(entry)
+        self.chat_auto_scroll_enabled = True
         self.render_chat_history()
         QApplication.processEvents()
 
@@ -2432,8 +2455,11 @@ class LibreGeoLensDockWidget(QDockWidget):
         item = self.chat_list.currentItem()
         self.chat_list.setCurrentItem(item)
         self.load_chat(item)
-        self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
-        
+        scrollbar = self.chat_history.verticalScrollBar()
+        if scrollbar is not None:
+            with QSignalBlocker(scrollbar):
+                scrollbar.setValue(scrollbar.maximum())
+
     def show_quick_help(self, first_time=False):
         """Display a quick help guide with workflow steps in a non-modal dialog"""
         help_text = """
