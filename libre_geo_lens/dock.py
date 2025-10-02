@@ -31,7 +31,7 @@ from .custom_qt import (zoom_to_and_flash_feature, CustomTextBrowser, ImageDispl
 
 from qgis.PyQt.QtGui import QPixmap, QImage, QColor, QTextOption, QPalette
 from qgis.PyQt.QtCore import (QBuffer, QByteArray, Qt, QSettings, QVariant, QSize, QTimer, QSignalBlocker,
-                              QObject, QThread, pyqtSignal, pyqtSlot)
+                              QObject, QThread, pyqtSignal, pyqtSlot, QMetaObject)
 from qgis.PyQt.QtWidgets import (QSizePolicy, QFileDialog, QMessageBox, QInputDialog, QComboBox, QLabel, QVBoxLayout,
                                  QPushButton, QWidget, QTextEdit, QApplication, QRadioButton, QHBoxLayout, QDockWidget,
                                  QSplitter, QListWidget, QListWidgetItem, QDialog, QTextBrowser, QCheckBox, QLineEdit,
@@ -39,7 +39,7 @@ from qgis.PyQt.QtWidgets import (QSizePolicy, QFileDialog, QMessageBox, QInputDi
 from qgis.core import (QgsVectorLayer, QgsRasterLayer, QgsSymbol, QgsSimpleLineSymbolLayer, QgsUnitTypes,
                        QgsRectangle, QgsWkbTypes, QgsProject, QgsGeometry, QgsMapRendererParallelJob, QgsFeature,
                        QgsField, QgsVectorFileWriter, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-                       QgsFeatureRequest, QgsLayerTreeLayer)
+                       QgsFeatureRequest, QgsLayerTreeLayer, QgsMessageLog)
 
 
 API_KEY_SENTINEL = "__LIBREGEOLENS_API_KEY__"
@@ -61,12 +61,18 @@ class MLLMStreamWorker(QObject):
         self.stream_supported = stream_supported
         self.parse_stream_chunk = parse_stream_chunk
         self.parse_completion_response = parse_completion_response
+        self._cancel_requested = False
+
+    @pyqtSlot()
+    def request_cancel(self):
+        self._cancel_requested = True
 
     def run(self):
         response_text = ""
         reasoning_text = ""
         stream_success = False
         stream_error = None
+        cancelled = False
 
         try:
             if self.stream_supported:
@@ -77,21 +83,50 @@ class MLLMStreamWorker(QObject):
                         stream=True,
                         **self.base_kwargs
                     )
-                    for chunk in response_stream:
-                        text_chunk, reasoning_chunk = self.parse_stream_chunk(chunk)
-                        if text_chunk:
-                            response_text += text_chunk
-                        if reasoning_chunk:
-                            reasoning_text += reasoning_chunk
-                        if text_chunk or reasoning_chunk:
-                            self.chunk_received.emit(text_chunk, reasoning_chunk)
-                    stream_success = True
+                    if self._cancel_requested:
+                        cancelled = True
+                        if hasattr(response_stream, "close"):
+                            try:
+                                response_stream.close()
+                            except Exception:
+                                pass
+                    else:
+                        for chunk in response_stream:
+                            if self._cancel_requested:
+                                cancelled = True
+                                break
+                            text_chunk, reasoning_chunk = self.parse_stream_chunk(chunk)
+                            if text_chunk:
+                                response_text += text_chunk
+                            if reasoning_chunk:
+                                reasoning_text += reasoning_chunk
+                            if text_chunk or reasoning_chunk:
+                                self.chunk_received.emit(text_chunk, reasoning_chunk)
+                        if hasattr(response_stream, "close"):
+                            try:
+                                response_stream.close()
+                            except Exception:
+                                pass
+                    if not cancelled:
+                        stream_success = True
                 except Exception as error:
                     stream_error = error
                     self.stream_failed.emit({
                         "error": error,
                         "traceback": traceback.format_exc(),
                     })
+
+            cancelled = cancelled or self._cancel_requested
+
+            if cancelled:
+                self.completed.emit({
+                    "response_text": response_text or "",
+                    "reasoning_text": reasoning_text or "",
+                    "stream_success": stream_success,
+                    "stream_error": stream_error,
+                    "cancelled": True,
+                })
+                return
 
             if not stream_success:
                 try:
@@ -116,6 +151,7 @@ class MLLMStreamWorker(QObject):
                 "reasoning_text": reasoning_text or "",
                 "stream_success": stream_success,
                 "stream_error": stream_error,
+                "cancelled": False,
             })
         except Exception as exc:
             self.failed.emit({
@@ -863,7 +899,18 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.send_to_mllm_button.setStyleSheet("background-color: #4CAF50; color: white; padding: 10px;")
         self.send_to_mllm_button.clicked.connect(self.send_to_mllm_fn)
         self.send_to_mllm_button.setToolTip("Send your prompt and selected image chips to the Multimodal Large Language Model")
-        main_content_layout.addWidget(self.send_to_mllm_button)
+
+        send_button_row = QHBoxLayout()
+        send_button_row.addWidget(self.send_to_mllm_button)
+
+        self.cancel_mllm_button = QPushButton("Cancel")
+        self.cancel_mllm_button.setEnabled(False)
+        self.cancel_mllm_button.setToolTip("Cancel the current Send to MLLM request")
+        self.cancel_mllm_button.clicked.connect(self.cancel_active_mllm_request)
+        send_button_row.addWidget(self.cancel_mllm_button)
+        send_button_row.addStretch()
+
+        main_content_layout.addLayout(send_button_row)
 
         self.service_templates = {
             "OpenAI": {
@@ -1355,6 +1402,9 @@ class LibreGeoLensDockWidget(QDockWidget):
             html_parts.append(
                 f'<div id="interaction-{entry["display_id"]}">{user_html}</div>'
             )
+
+            if entry.get("is_user_only"):
+                continue
 
             for chip in entry.get("chips", []):
                 resolution_span = ""
@@ -2648,8 +2698,20 @@ class LibreGeoLensDockWidget(QDockWidget):
 
         self.prompt_input.clear()
 
-        user_message = {"role": "user", "content": [{"type": "text", "text": prompt}]}
-        self.conversation.append(user_message)
+        stop_prompt = "I have stopped your response"
+        if self.conversation and self.conversation[-1].get("role") == "user":
+            last_content = self.conversation[-1].get("content") or []
+            first_chunk = last_content[0] if last_content else None
+            last_text = ""
+            if isinstance(first_chunk, dict) and first_chunk.get("type") == "text":
+                last_text = first_chunk.get("text", "")
+            if last_text and last_text.startswith(stop_prompt):
+                prompt = self.conversation[-1]["content"][0]["text"] + ". " + prompt
+                self.conversation[-1]["content"][0]["text"] = prompt
+        else:
+            user_message = {"role": "user", "content": [{"type": "text", "text": prompt}]}
+            self.conversation.append(user_message)
+        QgsMessageLog.logMessage(self.conversation[-1]["content"][0]["text"], "LGL")
 
         n_images = len(self.image_display_widget.images)
         chip_ids_sequence, chip_modes_sequence = [], []
@@ -2825,20 +2887,128 @@ class LibreGeoLensDockWidget(QDockWidget):
         request_context["thread"] = thread
         self.active_streams[entry_id] = request_context
         self._lock_ui_for_stream()
+        self.cancel_mllm_button.setEnabled(True)
 
         worker.chunk_received.connect(self._worker_chunk_received)
         worker.stream_failed.connect(self._worker_stream_failed)
         worker.completed.connect(self._worker_completed)
         worker.failed.connect(self._worker_failed)
         worker.done.connect(thread.quit)
-        worker.done.connect(
-            self._worker_done
-        )
-        worker.done.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+        worker.done.connect(self._worker_done)
 
         thread.started.connect(worker.run)
         thread.start()
+
+    def _disconnect_worker_stream_signals(self, worker):
+        # Keep 'done' so cleanup proceeds; silence all others
+        try:
+            worker.chunk_received.disconnect(self._worker_chunk_received)
+        except Exception:
+            pass
+        try:
+            worker.stream_failed.disconnect(self._worker_stream_failed)
+        except Exception:
+            pass
+        try:
+            worker.completed.disconnect(self._worker_completed)
+        except Exception:
+            pass
+        try:
+            worker.failed.disconnect(self._worker_failed)
+        except Exception:
+            pass
+
+    def cancel_active_mllm_request(self):
+        if not self.active_streams:
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Nothing to Cancel",
+                "There is no Send to MLLM request in progress."
+            )
+            return
+
+        pending_entry = None
+        entry_id = None
+        for candidate in reversed(self.rendered_interactions):
+            candidate_id = candidate.get("display_id")
+            if not candidate.get("is_pending"):
+                continue
+            if candidate_id in self.active_streams:
+                pending_entry = candidate
+                entry_id = candidate_id
+                break
+
+        if entry_id is None:
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Nothing to Cancel",
+                "There is no Send to MLLM request in progress."
+            )
+            return
+
+        context = self.active_streams.get(entry_id)
+        if context is None:
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Nothing to Cancel",
+                "There is no Send to MLLM request in progress."
+            )
+            return
+
+        worker = context.get("worker")
+        if worker is not None:
+            # Thread-safe cancellation into the worker's thread:
+            QMetaObject.invokeMethod(worker, "request_cancel", Qt.QueuedConnection)
+            # Prevent any other UI-updating signals from the cancelled worker:
+            self._disconnect_worker_stream_signals(worker)
+
+        has_stream_output = bool(
+            (pending_entry.get("response_stream") or "")
+            or (pending_entry.get("reasoning_stream") or "")
+        )
+
+        if has_stream_output:
+            context["handled_cancel"] = True
+            response_text = pending_entry.get("response_stream") or ""
+            reasoning_text = pending_entry.get("reasoning_stream") or ""
+            self._finalize_interaction(
+                entry_id,
+                pending_entry,
+                context,
+                response_text,
+                reasoning_text,
+                skip_reload=True
+            )
+
+            stop_prompt = "I have stopped your response"
+            self.conversation.append({
+                "role": "user",
+                "content": [{"type": "text", "text": stop_prompt}]
+            })
+
+            self.chat_auto_scroll_enabled = True
+
+        else:
+            context["handled_cancel"] = True
+            prompt_text = context.get("prompt", "")
+            user_idx = context.get("user_message_index")
+            if user_idx is not None and 0 <= user_idx < len(self.conversation):
+                self.conversation = self.conversation[:user_idx]
+
+            if pending_entry in self.rendered_interactions:
+                self.rendered_interactions.remove(pending_entry)
+
+            if prompt_text:
+                self.prompt_input.setPlainText(prompt_text)
+
+            self.chat_auto_scroll_enabled = True
+            self.render_chat_history()
+
+            context["ready_for_cleanup"] = True
+            if all(ctx.get("ready_for_cleanup") for ctx in self.active_streams.values()):
+                self._unlock_ui_after_stream()
+
+        self.cancel_mllm_button.setEnabled(False)
 
     def _get_rendered_entry(self, entry_id):
         for entry in self.rendered_interactions:
@@ -2849,6 +3019,8 @@ class LibreGeoLensDockWidget(QDockWidget):
     def _handle_stream_chunk(self, entry_id, text_chunk, reasoning_chunk):
         entry = self._get_rendered_entry(entry_id)
         if not entry:
+            return
+        if not entry.get("is_pending"):
             return
         updated = False
         if text_chunk:
@@ -2989,6 +3161,9 @@ class LibreGeoLensDockWidget(QDockWidget):
         if not entry or context is None:
             return
 
+        if context.get("handled_cancel"):
+            return
+
         stream_success = bool(payload.get("stream_success"))
         response_text = payload.get("response_text") or ""
         reasoning_text = payload.get("reasoning_text") or ""
@@ -3019,6 +3194,9 @@ class LibreGeoLensDockWidget(QDockWidget):
             final_error = error_payload
         entry = self._get_rendered_entry(entry_id)
 
+        if context and context.get("handled_cancel"):
+            return
+
         if context:
             user_idx = context.get("user_message_index")
             if user_idx is not None and 0 <= user_idx < len(self.conversation):
@@ -3040,17 +3218,40 @@ class LibreGeoLensDockWidget(QDockWidget):
             print(f"LibreGeoLens interaction error: {traceback_text}")
 
         QMessageBox.warning(self.iface.mainWindow(), "Error", message)
-        self._cleanup_active_stream(entry_id, context)
+        if context is not None:
+            context["handled_error"] = True
         self.reload_current_chat()
 
     def _on_stream_done(self, entry_id):
         context = self.active_streams.get(entry_id)
         if not context:
             return
+
+        worker = context.get("worker")
+        thread = context.get("thread")
+
+        # 1) Make sure no more UI-updating signals can land
+        if worker:
+            self._disconnect_worker_stream_signals(worker)
+
+        # 2) Ensure the thread is stopped
+        if thread and thread.isRunning():
+            thread.quit()
+            # Be gentle; don’t hang the UI here if a provider misbehaves
+            thread.wait(100)
+
+        # 3) Now it’s safe to delete the objects
+        if worker:
+            worker.deleteLater()
+        if thread:
+            thread.deleteLater()
+
+        # 4) Drop references and finish normal cleanup
         context.pop("worker", None)
         context.pop("thread", None)
+        self._cleanup_active_stream(entry_id, context)
 
-    def _finalize_interaction(self, entry_id, entry, context, response_text, reasoning_text):
+    def _finalize_interaction(self, entry_id, entry, context, response_text, reasoning_text, skip_reload=False):
         entry["response"] = response_text or ""
         entry["reasoning"] = reasoning_text if reasoning_text else None
         entry["response_stream"] = ""
@@ -3147,24 +3348,34 @@ class LibreGeoLensDockWidget(QDockWidget):
                 self.area_drawing_tool.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
             self.image_display_widget.clear_images()
 
-        settings_dialog = SettingsDialog(self.iface.mainWindow())
-        settings_dialog.sync_local_logs_dir_with_s3(self.logs_dir)
+        QTimer.singleShot(0, lambda: SettingsDialog(self.iface.mainWindow())
+                          .sync_local_logs_dir_with_s3(self.logs_dir))
 
-        self._cleanup_active_stream(entry_id, context)
+        context["ready_for_cleanup"] = True
 
-        self.reload_current_chat()
+        if all(ctx.get("ready_for_cleanup") for ctx in self.active_streams.values()):
+            self.cancel_mllm_button.setEnabled(False)
+            self._unlock_ui_after_stream()
+
+        if not skip_reload:
+            QTimer.singleShot(0, self.reload_current_chat)
 
     def _cleanup_active_stream(self, entry_id, context=None):
         ctx = context if context is not None else self.active_streams.get(entry_id)
         self.active_streams.pop(entry_id, None)
         if not ctx:
             if not self.active_streams:
+                if hasattr(self, "cancel_mllm_button"):
+                    self.cancel_mllm_button.setEnabled(False)
                 self._unlock_ui_after_stream()
             return
-        thread = ctx.get("thread")
+        worker = ctx.pop("worker", None)
+        thread = ctx.pop("thread", None)
         if thread and thread.isRunning():
             thread.quit()
         if not self.active_streams:
+            if hasattr(self, "cancel_mllm_button"):
+                self.cancel_mllm_button.setEnabled(False)
             self._unlock_ui_after_stream()
 
     def reload_current_chat(self):
