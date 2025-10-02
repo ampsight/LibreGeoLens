@@ -25,18 +25,21 @@ A QGIS plugin for experimenting with Multimodal Large Language Models (MLLMs) to
 
 ### MLLM Services
 
-LibreGeoLens now routes all model traffic through [LiteLLM](https://docs.litellm.ai/), which unlocks many providers with a
-single integration. The plugin ships with presets for OpenAI, Groq, Anthropic, and Google AI Studio,
-and will only surface a provider in the UI when the required environment variables are available.
-Configure them in QGIS via `Settings` -> `Options` -> `System` -> scroll down to `Environment`, toggle if needed,
-enable `Use custom variables` if needed, and add the variables you plan to use:
-- `OPENAI_API_KEY` (optionally add `OPENAI_API_BASE` and/or `OPENAI_ORG_ID`)
-- `GROQ_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `GEMINI_API_KEY`
+LibreGeoLens routes all model traffic through [LiteLLM](https://docs.litellm.ai/), unlocking many providers with a
+single integration. The dock now includes a `Manage Services` button that opens a configuration dialog where you can:
 
-Restart QGIS after setting environment variables. You can add additional MLLMs for any configured
-provider from the LibreGeoLens UI (`Add Model` button) without modifying the source code.
+- Enable the built-in presets for OpenAI, Groq, Anthropic, and Google AI Studio by supplying API keys.
+- Register any LiteLLM provider by entering its provider name, API key, optional API base (for OpenAI-compatible endpoints like vLLM),
+  and whether streaming is supported.
+- Provide extra environment variables that should be applied before calling LiteLLM.
+- Set image input limits per service (either maximum MB or maximum pixel dimensions) to match each provider's expectations.
+- Add or remove vision-capable models for each service; the lists from previous versions are still respected and now live inside this dialog.
+
+Environment variables remain a valid fallback: if you leave an API key empty in `Manage Services`, LibreGeoLens will look
+for the expected system environment variables (e.g. `OPENAI_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`).
+Configure them in QGIS via `Settings` -> `Options` -> `System` -> scroll down to `Environment`, toggle if needed,
+enable `Use custom variables` if needed, and add the variables you need. Restart QGIS after changing environment
+variables so the plugin receives the updated values.
 
 #### Conversation Summaries
 

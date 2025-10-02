@@ -1,5 +1,6 @@
 import os
 import math
+import copy
 import json
 import io
 import base64
@@ -33,11 +34,15 @@ from qgis.PyQt.QtCore import (QBuffer, QByteArray, Qt, QSettings, QVariant, QSiz
                               QObject, QThread, pyqtSignal, pyqtSlot)
 from qgis.PyQt.QtWidgets import (QSizePolicy, QFileDialog, QMessageBox, QInputDialog, QComboBox, QLabel, QVBoxLayout,
                                  QPushButton, QWidget, QTextEdit, QApplication, QRadioButton, QHBoxLayout, QDockWidget,
-                                 QSplitter, QListWidget, QListWidgetItem, QDialog, QTextBrowser, QCheckBox)
+                                 QSplitter, QListWidget, QListWidgetItem, QDialog, QTextBrowser, QCheckBox, QLineEdit,
+                                 QPlainTextEdit, QDialogButtonBox, QFormLayout, QSpinBox, QDoubleSpinBox)
 from qgis.core import (QgsVectorLayer, QgsRasterLayer, QgsSymbol, QgsSimpleLineSymbolLayer, QgsUnitTypes,
                        QgsRectangle, QgsWkbTypes, QgsProject, QgsGeometry, QgsMapRendererParallelJob, QgsFeature,
                        QgsField, QgsVectorFileWriter, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
                        QgsFeatureRequest, QgsLayerTreeLayer)
+
+
+API_KEY_SENTINEL = "__LIBREGEOLENS_API_KEY__"
 
 
 class MLLMStreamWorker(QObject):
@@ -120,6 +125,541 @@ class MLLMStreamWorker(QObject):
         finally:
             self.done.emit()
 
+
+class ManageServicesDialog(QDialog):
+    def __init__(self, parent, service_templates, service_configurations, added_models,
+                 default_service_names, deduplicate_fn):
+        super().__init__(parent)
+        self.setWindowTitle("Manage Services")
+        self.setModal(True)
+        self.resize(820, 560)
+
+        self.templates = copy.deepcopy(service_templates)
+        self.default_service_names = set(default_service_names)
+        self.working_configurations = copy.deepcopy(service_configurations or {})
+        self.working_added_models = copy.deepcopy(added_models or {})
+        self.deduplicate_fn = deduplicate_fn
+
+        for name in self.templates.keys():
+            self.working_configurations.setdefault(name, {})
+            self.working_added_models.setdefault(name, [])
+
+        self.current_service = None
+        self.result_configurations = None
+        self.result_added_models = None
+        self.env_var_validation_issues = {}
+
+        main_layout = QVBoxLayout(self)
+        content_layout = QHBoxLayout()
+        main_layout.addLayout(content_layout)
+
+        list_panel = QVBoxLayout()
+        self.service_list = QListWidget()
+        self.service_list.currentItemChanged.connect(self.on_service_changed)
+        list_panel.addWidget(self.service_list)
+
+        list_button_layout = QHBoxLayout()
+        self.add_service_button = QPushButton("Add Service")
+        self.add_service_button.setToolTip("Register a new LiteLLM provider")
+        self.add_service_button.clicked.connect(self.add_service)
+        list_button_layout.addWidget(self.add_service_button)
+
+        self.remove_service_button = QPushButton("Remove Service")
+        self.remove_service_button.setToolTip("Remove a user-defined provider")
+        self.remove_service_button.clicked.connect(self.remove_service)
+        list_button_layout.addWidget(self.remove_service_button)
+        list_panel.addLayout(list_button_layout)
+
+        content_layout.addLayout(list_panel, 1)
+
+        detail_panel = QVBoxLayout()
+        detail_form = QFormLayout()
+        detail_panel.addLayout(detail_form)
+
+        self.display_name_input = QLineEdit()
+        self.display_name_input.setReadOnly(True)
+        detail_form.addRow("Display Name:", self.display_name_input)
+
+        self.provider_input = QLineEdit()
+        self.provider_input.setPlaceholderText("e.g. openai, groq, anthropic, gemini")
+        detail_form.addRow("Provider Name:", self.provider_input)
+
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("Enter the API key for this provider")
+        detail_form.addRow("Provider API Key:", self.api_key_input)
+
+        self.api_base_input = QLineEdit()
+        self.api_base_input.setPlaceholderText("Optional override, e.g. for vLLM endpoints")
+        detail_form.addRow("API Base (optional):", self.api_base_input)
+
+        self.streaming_checkbox = QCheckBox("Supports streaming responses")
+        detail_form.addRow("Streaming Support:", self.streaming_checkbox)
+
+        self.limit_mode_combo = QComboBox()
+        self.limit_mode_combo.addItem("No limit", "none")
+        self.limit_mode_combo.addItem("Max image size (MB)", "image_mb")
+        self.limit_mode_combo.addItem("Max dimensions (px)", "image_px")
+        self.limit_mode_combo.currentIndexChanged.connect(self.on_limit_mode_changed)
+        detail_form.addRow("Image Limit:", self.limit_mode_combo)
+
+        self.image_mb_spin = QDoubleSpinBox()
+        self.image_mb_spin.setDecimals(1)
+        self.image_mb_spin.setSingleStep(0.1)
+        self.image_mb_spin.setRange(0.1, 10000000.0)
+        self.image_mb_spin.setToolTip("Maximum encoded image size in megabytes")
+        detail_form.addRow("Max size (MB):", self.image_mb_spin)
+
+        limit_px_layout = QHBoxLayout()
+        self.longest_px_spin = QSpinBox()
+        self.longest_px_spin.setRange(0, 10000000)
+        self.longest_px_spin.setToolTip("Maximum allowed longest side in pixels (0 disables this constraint)")
+        self.shortest_px_spin = QSpinBox()
+        self.shortest_px_spin.setRange(0, 1000000)
+        self.shortest_px_spin.setToolTip("Maximum allowed shortest side in pixels (0 disables this constraint)")
+        limit_px_layout.addWidget(QLabel("Longest:"))
+        limit_px_layout.addWidget(self.longest_px_spin)
+        limit_px_layout.addSpacing(12)
+        limit_px_layout.addWidget(QLabel("Shortest:"))
+        limit_px_layout.addWidget(self.shortest_px_spin)
+        detail_form.addRow("Max dimensions (px):", limit_px_layout)
+
+        env_label = QLabel("Extra Env Vars:")
+        env_label.setToolTip("One per line in KEY=VALUE format; values override existing environment variables")
+        self.env_vars_input = QPlainTextEdit()
+        detail_form.addRow(env_label, self.env_vars_input)
+
+        detail_panel.addSpacing(12)
+
+        models_label = QLabel("Models:")
+        detail_panel.addWidget(models_label)
+
+        self.models_list = QListWidget()
+        self.models_list.currentItemChanged.connect(self.update_model_buttons)
+        detail_panel.addWidget(self.models_list, 1)
+
+        model_button_layout = QHBoxLayout()
+        self.add_model_button = QPushButton("Add Model")
+        self.add_model_button.clicked.connect(self.add_model)
+        model_button_layout.addWidget(self.add_model_button)
+        self.remove_model_button = QPushButton("Remove Model")
+        self.remove_model_button.clicked.connect(self.remove_selected_model)
+        model_button_layout.addWidget(self.remove_model_button)
+        detail_panel.addLayout(model_button_layout)
+
+        content_layout.addLayout(detail_panel, 2)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.handle_accept)
+        button_box.rejected.connect(self.reject)
+        main_layout.addWidget(button_box)
+
+        self.on_limit_mode_changed()
+        self.update_service_list()
+
+    # -----------------
+
+    def update_service_list(self, select_name=None):
+        names = set(self.templates.keys()) | set(self.working_configurations.keys())
+        ordered_names = sorted(names, key=lambda value: value.lower())
+
+        previous_service = self.current_service
+        self.service_list.blockSignals(True)
+        self.service_list.clear()
+        for name in ordered_names:
+            status_text = "Configured" if self._is_service_configured(name) else "Missing credentials"
+            item = QListWidgetItem(f"{name} ({status_text})")
+            item.setData(Qt.UserRole, name)
+            self.service_list.addItem(item)
+        self.service_list.blockSignals(False)
+
+        target_name = select_name or previous_service or (ordered_names[0] if ordered_names else None)
+        if target_name:
+            for index in range(self.service_list.count()):
+                item = self.service_list.item(index)
+                if item.data(Qt.UserRole) == target_name:
+                    self.service_list.setCurrentRow(index)
+                    return
+        else:
+            self.current_service = None
+
+    def refresh_status_labels(self):
+        for index in range(self.service_list.count()):
+            item = self.service_list.item(index)
+            name = item.data(Qt.UserRole)
+            status_text = "Configured" if self._is_service_configured(name) else "Missing credentials"
+            item.setText(f"{name} ({status_text})")
+
+    def _is_service_configured(self, service_name):
+        config = self.working_configurations.get(service_name, {})
+        api_key = config.get("api_key")
+        env_pairs = config.get("env_vars") or {}
+        if api_key:
+            return True
+
+        template = self.templates.get(service_name, {})
+        required_envs = [env_info for env_info in template.get("env_vars", []) if env_info.get("required", True)]
+        if required_envs:
+            for env_info in required_envs:
+                env_name = env_info.get("name")
+                if not env_name:
+                    continue
+                if env_pairs.get(env_name) or os.getenv(env_name):
+                    continue
+                return False
+            return True
+
+        return bool(env_pairs)
+
+    def on_service_changed(self, current_item, previous_item):
+        if previous_item is not None and self.current_service is not None:
+            self.persist_current_service()
+
+        if current_item is None:
+            self.current_service = None
+            self._set_detail_widgets_enabled(False)
+            return
+
+        service_name = current_item.data(Qt.UserRole)
+        self.current_service = service_name
+        self._set_detail_widgets_enabled(True)
+        self.populate_service_form(service_name)
+
+    def _set_detail_widgets_enabled(self, enabled):
+        for widget in [self.provider_input, self.api_key_input, self.api_base_input,
+                       self.streaming_checkbox, self.limit_mode_combo, self.image_mb_spin,
+                       self.longest_px_spin, self.shortest_px_spin, self.env_vars_input,
+                       self.add_model_button, self.remove_model_button, self.models_list]:
+            widget.setEnabled(enabled)
+
+    def populate_service_form(self, service_name):
+        template = self.templates.get(service_name, {})
+        config = self.working_configurations.get(service_name, {})
+
+        self.display_name_input.setText(service_name)
+
+        provider = config.get("provider_name")
+        if not provider:
+            provider = template.get("litellm_params", {}).get("custom_llm_provider")
+        if not provider:
+            provider = template.get("provider_name")
+        self.provider_input.setText(provider or "")
+
+        self.api_key_input.setText(config.get("api_key", ""))
+        self.api_base_input.setText(config.get("api_base", ""))
+        self.streaming_checkbox.setChecked(config.get("supports_streaming",
+                                                     template.get("supports_streaming", True)))
+
+        limits = config.get("limits") if config.get("limits") else template.get("limits", {})
+        self._apply_limits_to_widgets(limits)
+
+        env_pairs = config.get("env_vars") or {}
+        env_text = "\n".join(f"{key}={value}" for key, value in env_pairs.items())
+        self.env_vars_input.setPlainText(env_text)
+
+        self.remove_service_button.setEnabled(service_name not in self.default_service_names)
+        self.populate_models_list(service_name)
+        self.update_model_buttons()
+        self.refresh_status_labels()
+
+    def _apply_limits_to_widgets(self, limits):
+        if not limits:
+            self.limit_mode_combo.setCurrentIndex(self.limit_mode_combo.findData("none"))
+            self.image_mb_spin.setValue(1.0)
+            self.longest_px_spin.setValue(0)
+            self.shortest_px_spin.setValue(0)
+        elif "image_mb" in limits:
+            self.limit_mode_combo.setCurrentIndex(self.limit_mode_combo.findData("image_mb"))
+            try:
+                value = float(limits.get("image_mb", 0))
+            except (TypeError, ValueError):
+                value = 0.0
+            self.image_mb_spin.setValue(max(0.1, value) if value else 1.0)
+        elif "image_px" in limits:
+            self.limit_mode_combo.setCurrentIndex(self.limit_mode_combo.findData("image_px"))
+            px_limits = limits.get("image_px", {})
+            self.longest_px_spin.setValue(int(px_limits.get("longest_side", 0) or 0))
+            self.shortest_px_spin.setValue(int(px_limits.get("shortest_side", 0) or 0))
+        else:
+            self.limit_mode_combo.setCurrentIndex(self.limit_mode_combo.findData("none"))
+            self.image_mb_spin.setValue(1.0)
+            self.longest_px_spin.setValue(0)
+            self.shortest_px_spin.setValue(0)
+        self.on_limit_mode_changed()
+
+    def on_limit_mode_changed(self):
+        mode = self.limit_mode_combo.currentData()
+        self.image_mb_spin.setEnabled(mode == "image_mb")
+        self.longest_px_spin.setEnabled(mode == "image_px")
+        self.shortest_px_spin.setEnabled(mode == "image_px")
+
+    def populate_models_list(self, service_name):
+        self.models_list.clear()
+        template = self.templates.get(service_name, {})
+        base_models = template.get("models", [])
+        user_models = self.working_added_models.get(service_name, [])
+
+        for model in base_models:
+            item = QListWidgetItem(model)
+            item.setData(Qt.UserRole, {"model": model, "removable": False})
+            item.setToolTip("Preset model from the plugin configuration")
+            self.models_list.addItem(item)
+
+        for model in user_models:
+            item = QListWidgetItem(model)
+            item.setData(Qt.UserRole, {"model": model, "removable": True})
+            item.setToolTip("User-added model")
+            self.models_list.addItem(item)
+
+    def update_model_buttons(self):
+        item = self.models_list.currentItem()
+        if item is None:
+            self.remove_model_button.setEnabled(False)
+            return
+        data = item.data(Qt.UserRole) or {}
+        self.remove_model_button.setEnabled(bool(data.get("removable")))
+
+    def add_service(self):
+        if self.current_service is not None:
+            self.persist_current_service()
+
+        display_name, ok = QInputDialog.getText(self, "Add Service", "Display name:")
+        if not ok or not display_name.strip():
+            return
+
+        name = display_name.strip()
+        if name in self.templates or name in self.working_configurations:
+            QMessageBox.warning(self, "Service Exists", "A service with that name already exists. Choose another name.")
+            return
+
+        self.working_configurations[name] = {
+            "provider_name": "",
+            "api_key": "",
+            "api_base": "",
+            "env_vars": {},
+            "limits": {},
+            "supports_streaming": True,
+        }
+        self.working_added_models.setdefault(name, [])
+        self.update_service_list(select_name=name)
+
+    def remove_service(self):
+        item = self.service_list.currentItem()
+        if not item:
+            return
+        service_name = item.data(Qt.UserRole)
+        if service_name in self.default_service_names:
+            QMessageBox.information(self, "Protected Service", "Built-in services cannot be removed.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Remove Service",
+            f"Remove '{service_name}' from the configuration?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.persist_current_service()
+        self.working_configurations.pop(service_name, None)
+        self.working_added_models.pop(service_name, None)
+        self.env_var_validation_issues.pop(service_name, None)
+        self.update_service_list()
+
+    def add_model(self):
+        if not self.current_service:
+            return
+        model_name, ok = QInputDialog.getText(self, "Add Model", "Enter the full model identifier:")
+        if not ok or not model_name.strip():
+            return
+        model_name = model_name.strip()
+
+        existing_models = [self.models_list.item(index).text() for index in range(self.models_list.count())]
+        if model_name in existing_models:
+            QMessageBox.information(self, "Model Exists", "That model is already listed for this provider.")
+            return
+
+        try:
+            supports_vision = litellm.supports_vision(model=model_name)
+        except Exception:
+            supports_vision = False
+        # if not supports_vision:
+        #     QMessageBox.information(
+        #         self,
+        #         "Model Not Supported",
+        #         f"Model '{model_name}' does not exist or does not support vision. Please verify and try again."
+        #     )
+        #     return
+
+        models = self.working_added_models.setdefault(self.current_service, [])
+        models.append(model_name)
+        self.working_added_models[self.current_service] = self.deduplicate_fn(models)
+        self.populate_models_list(self.current_service)
+        self.refresh_status_labels()
+
+    def remove_selected_model(self):
+        item = self.models_list.currentItem()
+        if item is None:
+            return
+        data = item.data(Qt.UserRole) or {}
+        if not data.get("removable"):
+            QMessageBox.information(self, "Cannot Remove", "Preset models cannot be removed.")
+            return
+        model_name = data.get("model")
+        models = self.working_added_models.get(self.current_service, [])
+        if model_name in models:
+            models.remove(model_name)
+            self.working_added_models[self.current_service] = self.deduplicate_fn(models)
+            self.populate_models_list(self.current_service)
+
+    def persist_current_service(self):
+        if not self.current_service:
+            return
+        config = self.working_configurations.setdefault(self.current_service, {})
+        template = self.templates.get(self.current_service, {})
+
+        provider_name = self.provider_input.text().strip()
+        template_provider = template.get("litellm_params", {}).get("custom_llm_provider")
+        if not template_provider:
+            template_provider = template.get("provider_name")
+
+        if self.current_service in self.default_service_names:
+            if provider_name and provider_name != (template_provider or ""):
+                config["provider_name"] = provider_name
+            else:
+                config.pop("provider_name", None)
+        else:
+            if provider_name:
+                config["provider_name"] = provider_name
+            else:
+                config.pop("provider_name", None)
+
+        api_key = self.api_key_input.text().strip()
+        if api_key:
+            config["api_key"] = api_key
+        else:
+            config.pop("api_key", None)
+
+        api_base = self.api_base_input.text().strip()
+        if api_base:
+            config["api_base"] = api_base
+        else:
+            config.pop("api_base", None)
+
+        supports_streaming = self.streaming_checkbox.isChecked()
+        template_streaming = template.get("supports_streaming", True)
+        if self.current_service in self.default_service_names:
+            if supports_streaming != template_streaming:
+                config["supports_streaming"] = supports_streaming
+            else:
+                config.pop("supports_streaming", None)
+        else:
+            if not supports_streaming:
+                config["supports_streaming"] = False
+            else:
+                config.pop("supports_streaming", None)
+
+        limits = self._collect_limits()
+        template_limits = template.get("limits", {})
+        if limits and limits != template_limits:
+            config["limits"] = limits
+        else:
+            config.pop("limits", None)
+
+        env_vars, invalid_lines = self._collect_env_vars()
+        if env_vars:
+            config["env_vars"] = env_vars
+        else:
+            config.pop("env_vars", None)
+
+        if invalid_lines:
+            self.env_var_validation_issues[self.current_service] = invalid_lines
+        else:
+            self.env_var_validation_issues.pop(self.current_service, None)
+
+        self.refresh_status_labels()
+
+    def _collect_limits(self):
+        mode = self.limit_mode_combo.currentData()
+        if mode == "image_mb":
+            value = float(self.image_mb_spin.value())
+            if value > 0:
+                return {"image_mb": value}
+        elif mode == "image_px":
+            longest = int(self.longest_px_spin.value())
+            shortest = int(self.shortest_px_spin.value())
+            limits = {}
+            if longest > 0:
+                limits["longest_side"] = longest
+            if shortest > 0:
+                limits["shortest_side"] = shortest
+            if limits:
+                return {"image_px": limits}
+        return {}
+
+    def _collect_env_vars(self):
+        env_text = self.env_vars_input.toPlainText()
+        env_pairs = {}
+        invalid_lines = []
+        for raw_line in env_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if "=" not in line:
+                invalid_lines.append(raw_line)
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key:
+                invalid_lines.append(raw_line)
+                continue
+            env_pairs[key] = value
+        return env_pairs, invalid_lines
+
+    def handle_accept(self):
+        self.persist_current_service()
+
+        if self.env_var_validation_issues:
+            messages = []
+            for service_name, lines in self.env_var_validation_issues.items():
+                formatted = "; ".join(line.strip() for line in lines if line.strip())
+                messages.append(f"{service_name}: {formatted}")
+            QMessageBox.warning(
+                self,
+                "Invalid Env Vars",
+                "Fix invalid environment variable entries before saving:\n" + "\n".join(messages)
+            )
+            return
+
+        missing_providers = []
+        for name in set(self.templates.keys()) | set(self.working_configurations.keys()):
+            config = self.working_configurations.get(name, {})
+            provider = config.get("provider_name")
+            if not provider:
+                template = self.templates.get(name, {})
+                provider = template.get("litellm_params", {}).get("custom_llm_provider")
+                if not provider:
+                    provider = template.get("provider_name")
+            if not provider:
+                missing_providers.append(name)
+
+        if missing_providers:
+            QMessageBox.warning(
+                self,
+                "Missing Provider",
+                "Set the LiteLLM provider name for: " + ", ".join(missing_providers)
+            )
+            return
+
+        self.result_configurations = {
+            name: config for name, config in self.working_configurations.items() if config
+        }
+        self.result_added_models = {
+            name: models for name, models in self.working_added_models.items() if models
+        }
+        self.accept()
 
 class LibreGeoLensDockWidget(QDockWidget):
     def __init__(self, iface, parent=None):
@@ -325,7 +865,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.send_to_mllm_button.setToolTip("Send your prompt and selected image chips to the Multimodal Large Language Model")
         main_content_layout.addWidget(self.send_to_mllm_button)
 
-        self.supported_api_clients = {
+        self.service_templates = {
             "OpenAI": {
                 "litellm_params": {"custom_llm_provider": "openai"},
                 "models": [
@@ -391,10 +931,19 @@ class LibreGeoLensDockWidget(QDockWidget):
             }
         }
 
+        self.service_configurations = self.load_service_configurations()
+        self._managed_env_keys = set()
         self.added_models = self.load_added_models()
+        self.supported_api_clients = self.build_supported_api_clients()
+        self.apply_service_env_overrides()
         self.available_api_clients = {}
 
         api_model_layout = QVBoxLayout()
+
+        self.manage_services_button = QPushButton("Manage MLLM Services")
+        self.manage_services_button.setToolTip("Configure LiteLLM providers, credentials, limits, and models")
+        self.manage_services_button.clicked.connect(self.open_manage_services_dialog)
+        api_model_layout.addWidget(self.manage_services_button)
 
         self.api_label = QLabel("MLLM Service:")
         api_model_layout.addWidget(self.api_label)
@@ -425,11 +974,6 @@ class LibreGeoLensDockWidget(QDockWidget):
         reasoning_controls_layout.addStretch()
         api_model_layout.addLayout(reasoning_controls_layout)
 
-        self.add_model_button = QPushButton("Add Model")
-        self.add_model_button.setToolTip("Add a model for the selected MLLM service")
-        self.add_model_button.clicked.connect(self.add_model)
-        api_model_layout.addWidget(self.add_model_button)
-
         self.refresh_available_api_clients()
 
         main_content_layout.addLayout(api_model_layout, stretch=1)
@@ -451,7 +995,7 @@ class LibreGeoLensDockWidget(QDockWidget):
             self.help_button,
             self.info_button,
             self.send_to_mllm_button,
-            self.add_model_button,
+            self.manage_services_button,
             self.chat_list,
             self.prompt_input,
             self.image_display_widget,
@@ -1504,6 +2048,93 @@ class LibreGeoLensDockWidget(QDockWidget):
         """Reset the info_dialog reference when the dialog is closed"""
         self.info_dialog = None
 
+    def load_service_configurations(self):
+        """Load persisted service overrides from QSettings."""
+        settings = QSettings("Ampsight", "LibreGeoLens")
+        stored = settings.value("service_configurations", "{}")
+        parsed = {}
+        if isinstance(stored, str):
+            try:
+                parsed = json.loads(stored)
+            except json.JSONDecodeError:
+                parsed = {}
+        elif isinstance(stored, dict):
+            parsed = stored
+        result = {}
+        if isinstance(parsed, dict):
+            for service_name, config in parsed.items():
+                if isinstance(config, dict):
+                    result[service_name] = config
+        return result
+
+    def save_service_configurations(self):
+        """Persist service overrides to QSettings."""
+        settings = QSettings("Ampsight", "LibreGeoLens")
+        settings.setValue("service_configurations", json.dumps(self.service_configurations or {}))
+
+    def build_supported_api_clients(self):
+        """Combine built-in templates with user overrides and custom services."""
+        merged = {}
+        for name, template in self.service_templates.items():
+            merged[name] = self._compose_service_entry(name, template, self.service_configurations.get(name))
+
+        for name, config in self.service_configurations.items():
+            if name in merged:
+                continue
+            merged[name] = self._compose_service_entry(name, {}, config)
+
+        return merged
+
+    def _compose_service_entry(self, name, template, user_config):
+        entry = copy.deepcopy(template) if template else {}
+        entry.setdefault("litellm_params", {})
+        entry.setdefault("models", [])
+        entry.setdefault("limits", {})
+        entry.setdefault("env_vars", [])
+        entry.setdefault("supports_streaming", True)
+        entry["user_defined"] = not bool(template)
+
+        user_section = copy.deepcopy(user_config) if user_config else {}
+        provider_override = user_section.get("provider_name")
+        if provider_override:
+            entry["litellm_params"] = dict(entry.get("litellm_params", {}))
+            entry["litellm_params"]["custom_llm_provider"] = provider_override
+
+        entry["supports_streaming"] = user_section.get("supports_streaming", entry.get("supports_streaming", True))
+
+        if user_section.get("limits"):
+            entry["limits"] = copy.deepcopy(user_section["limits"])
+
+        base_models = entry.get("models", [])
+        user_base_models = user_section.get("base_models", [])
+        if user_base_models:
+            combined_models = self._deduplicate_preserve_order(base_models + user_base_models)
+            entry["models"] = combined_models
+
+        entry["user_config"] = user_section
+        entry["provider_id"] = entry.get("litellm_params", {}).get("custom_llm_provider")
+        entry["user_env_overrides"] = user_section.get("env_vars", {})
+        entry["stored_api_key"] = user_section.get("api_key")
+        entry["stored_api_base"] = user_section.get("api_base")
+        return entry
+
+    def apply_service_env_overrides(self):
+        """Apply env var overrides defined in service configurations."""
+        new_keys = set()
+        for config in self.service_configurations.values():
+            env_vars = config.get("env_vars") or {}
+            for key, value in env_vars.items():
+                if not key or value is None:
+                    continue
+                os.environ[key] = value
+                new_keys.add(key)
+
+        for key in getattr(self, "_managed_env_keys", set()):
+            if key not in new_keys:
+                os.environ.pop(key, None)
+
+        self._managed_env_keys = new_keys
+
     def load_added_models(self):
         """Load user-defined models for each provider from settings."""
         settings = QSettings("Ampsight", "LibreGeoLens")
@@ -1533,7 +2164,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         settings.setValue("added_models", json.dumps(serializable))
 
     def refresh_available_api_clients(self):
-        """Populate the provider dropdown based on available environment variables."""
+        """Populate the provider dropdown based on configured credentials."""
         self.available_api_clients = {}
         for api_name, api_info in self.supported_api_clients.items():
             if not self.get_missing_env_vars(api_info):
@@ -1546,38 +2177,70 @@ class LibreGeoLensDockWidget(QDockWidget):
             self.api_selection.setEnabled(False)
             self.model_selection.clear()
             self.model_selection.setEnabled(False)
-            self.add_model_button.setEnabled(False)
             self.api_selection.blockSignals(False)
             return
 
         self.api_selection.setEnabled(True)
         self.model_selection.setEnabled(True)
-        self.add_model_button.setEnabled(True)
         for api_name in self.available_api_clients:
             self.api_selection.addItem(api_name)
         self.api_selection.blockSignals(False)
         self.update_model_choices()
         self.update_reasoning_controls_state()
 
-    @staticmethod
-    def get_missing_env_vars(api_config):
+    def get_missing_env_vars(self, api_config):
         missing = []
+        stored_api_key = api_config.get("stored_api_key")
+        stored_api_base = api_config.get("stored_api_base")
+        user_env_overrides = api_config.get("user_env_overrides") or {}
+
         for env_info in api_config.get("env_vars", []):
             if isinstance(env_info, dict):
                 name = env_info.get("name")
                 required = env_info.get("required", True)
+                param = env_info.get("param")
             else:
                 name = env_info
                 required = True
+                param = None
             if not name:
                 continue
-            if required and not os.getenv(name):
+            if param == "api_key" and stored_api_key:
+                continue
+            if param == "api_base" and stored_api_base:
+                continue
+            if user_env_overrides.get(name):
+                continue
+            if not required:
+                continue
+            if not os.getenv(name):
                 missing.append(name)
-        return missing
+
+        if missing:
+            return missing
+
+        if api_config.get("env_vars"):
+            return []
+
+        if stored_api_key:
+            return []
+
+        if api_config.get("user_env_overrides"):
+            return []
+
+        return [API_KEY_SENTINEL]
 
     @staticmethod
     def build_auth_params(api_config):
         params = {}
+        stored_api_key = api_config.get("stored_api_key")
+        if stored_api_key:
+            params.setdefault("api_key", stored_api_key)
+
+        stored_api_base = api_config.get("stored_api_base")
+        if stored_api_base:
+            params.setdefault("api_base", stored_api_base)
+
         for env_info in api_config.get("env_vars", []):
             if not isinstance(env_info, dict):
                 continue
@@ -1586,39 +2249,30 @@ class LibreGeoLensDockWidget(QDockWidget):
             if not name or not param:
                 continue
             value = os.getenv(name)
-            if value:
+            if not value and api_config.get("user_env_overrides"):
+                value = api_config["user_env_overrides"].get(name)
+            if value and param not in params:
                 params[param] = value
         return params
 
-    def add_model(self):
-        if not self.available_api_clients:
-            QMessageBox.information(self.iface.mainWindow(), "No Provider", "Configure an MLLM provider before adding models.")
-            return
-        api = self.api_selection.currentText()
-        if api not in self.available_api_clients:
-            QMessageBox.warning(self.iface.mainWindow(), "Error", "Select a configured MLLM provider first.")
-            return
-        model_name, ok = QInputDialog.getText(self.iface.mainWindow(), "Add Model", "Enter the full model identifier:")
-        if not ok or not model_name.strip():
-            return
-        model_name = model_name.strip()
-        existing = self._deduplicate_preserve_order(
-            self.supported_api_clients.get(api, {}).get("models", []) +
-            self.added_models.get(api, [])
+    def open_manage_services_dialog(self):
+        dialog = ManageServicesDialog(
+            self.iface.mainWindow(),
+            self.service_templates,
+            self.service_configurations,
+            self.added_models,
+            default_service_names=list(self.service_templates.keys()),
+            deduplicate_fn=self._deduplicate_preserve_order
         )
-        if model_name in existing:
-            QMessageBox.information(self.iface.mainWindow(), "Model Exists", "That model is already listed for this provider.")
-            return
-        if not litellm.supports_vision(model=model_name):
-            QMessageBox.information(self.iface.mainWindow(), "Model Not Supported",
-                                    f"""Model "{model_name}" does not exist or does not support vision. """
-                                    f"""Please double-check spelling and vision capabilities.""")
-            return
-        self.added_models.setdefault(api, [])
-        self.added_models[api].append(model_name)
-        self.added_models[api] = self._deduplicate_preserve_order(self.added_models[api])
-        self.save_added_models()
-        self.update_model_choices(select_model=model_name)
+
+        if dialog.exec_() == QDialog.Accepted:
+            self.service_configurations = dialog.result_configurations or {}
+            self.added_models = dialog.result_added_models or {}
+            self.save_service_configurations()
+            self.save_added_models()
+            self.supported_api_clients = self.build_supported_api_clients()
+            self.apply_service_env_overrides()
+            self.refresh_available_api_clients()
 
     @staticmethod
     def _deduplicate_preserve_order(items):
@@ -1955,7 +2609,7 @@ class LibreGeoLensDockWidget(QDockWidget):
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Error",
-                "No configured MLLM service found. Set the required environment variables and restart QGIS."
+                "No configured MLLM service found. Use Manage Services to configure credentials, then try again."
             )
             return
 
@@ -1967,11 +2621,18 @@ class LibreGeoLensDockWidget(QDockWidget):
         api_config = self.supported_api_clients[selected_api]
         missing_env = self.get_missing_env_vars(api_config)
         if missing_env:
-            QMessageBox.warning(
-                self.iface.mainWindow(),
-                "Error",
-                f"{selected_api} configuration incomplete. Missing environment variables: {', '.join(missing_env)}."
-            )
+            if missing_env == [API_KEY_SENTINEL]:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Error",
+                    f"{selected_api} configuration incomplete. Add an API key in Manage Services or expose one via environment variables."
+                )
+            else:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Error",
+                    f"{selected_api} configuration incomplete. Missing environment variables: {', '.join(missing_env)}."
+                )
             return
 
         auth_params = self.build_auth_params(api_config)
