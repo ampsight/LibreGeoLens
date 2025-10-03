@@ -22,9 +22,6 @@ Use 4-space indentation and snake_case for functions and module-level names; kee
 ## Git Guidelines
 Do not make any git commit, push or PRs. The user will do so manually after testing your changes.
 
-You're running via WSL on Windows while the source code is directly on Windows because QGIS (which runs on Windows)
-needs to load it. Thus, commands like `git diff` are going to show all the file as changed when that's not true.
-
 ## Security & Configuration Tips
 Never commit API keys or AWS credentials, document required environment variables
 (`OPENAI_API_KEY`, `GROQ_API_KEY`, `AWS_ACCESS_KEY_ID`, etc.) instead. Scrub private bucket names from logs or captures

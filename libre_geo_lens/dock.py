@@ -2306,15 +2306,19 @@ class LibreGeoLensDockWidget(QDockWidget):
 """
         # Dynamically generate limits information from supported_api_clients
         for api_name, api_info in self.supported_api_clients.items():
-            info_text += f"<li><b>{api_name}:</b><ul>"
+            info_text += f"<li><b>{api_name}:</b>"
             limits = api_info.get("limits", {})
-            
-            if "image_px" in limits:
-                px_limits = limits["image_px"]
-                info_text += f"<li>Max dimensions: {px_limits.get('longest_side')}px (longest side), {px_limits.get('shortest_side')}px (shortest side)</li>"
-            
-            if "image_mb" in limits:
-                info_text += f"<li>Max file size: {limits['image_mb']}MB</li>"
+
+            if not limits:
+                info_text += " None<ul>"
+            else:
+                info_text += "<ul>"
+                if "image_px" in limits:
+                    px_limits = limits["image_px"]
+                    info_text += f"<li>Max dimensions: {px_limits.get('longest_side')}px (longest side), {px_limits.get('shortest_side')}px (shortest side)</li>"
+
+                if "image_mb" in limits:
+                    info_text += f"<li>Max file size: {limits['image_mb']}MB</li>"
                 
             info_text += "</ul></li>"
         
@@ -3854,7 +3858,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         
         Recommended: Read GitHub repo's <a href="https://github.com/ampsight/LibreGeoLens/tree/main?
         tab=readme-ov-file#quickstart">Quickstart</a> and <a href="https://github.com/ampsight/LibreGeoLens/
-        tree/main?tab=readme-ov-file#more-features">More Features</a> sections
+        tree/main?tab=readme-ov-file#more-features">More Features</a> sections.
         
         <h3>Basic Workflow:</h3>
         <ol>
@@ -3867,9 +3871,9 @@ class LibreGeoLensDockWidget(QDockWidget):
             <li><b>Load imagery</b>:
                 <ul>
                     <li>Open your local georeferenced imagery directly with QGIS or click
-                     <b>Load GeoJSON</b> to load COG image outlines (red polygons)</li>
+                     <b>Load GeoJSON</b> to load COG image outlines (red polygons) for streaming</li>
                     <li>Choose <b>Use Demo Resources</b> if you don't have your own data</li>
-                    <li>If you want to use your own COGs, refer to the GitHub repo on how to do that</li>
+                    <li>If you want to stream your own COGs, refer to the GitHub repo on how to do that</li>
                     <li>If you used <b>Load GeoJSON</b>, zoom into one of the red polygons, click <b>Draw Area
                      to Stream COGs</b>, and draw a rectangle over the red polygon to load the imagery</li>
                 </ul>
@@ -3900,13 +3904,14 @@ class LibreGeoLensDockWidget(QDockWidget):
         <h3>Tips:</h3>
         <ul>
             <li>Hover over buttons and UI elements to see tooltips explaining their functions</li>
-            <li>You need API keys configured in QGIS environment settings (see <i>icon</i> → Settings)</li>
+            <li>Follow the MLLM Services section in GitHub for how to configure different models</li>
             <li>For large areas, raw chip extraction can be resource intensive</li>
             <li>All chips are saved as GeoJSON features (orange rectangles) for easy reference</li>
             <li>Click the "i" button by the radio buttons for info about image size limits</li>
-            <li>If LiteLLM mislabels a reasoning-capable model, open <b>Manage MLLM Services</b> and use the
-            <b>Reasoning Override</b> control. Only force reasoning when you're sure—the provider may fail if the
-            model isn't built for reasoning.</li>
+            <li>Sometimes LiteLLM wrongly considers a vision model non-vision: feel free to still add it and 
+            try it out with an image.</li>
+            <li>If LiteLLM mislabels whether a model is a reasoning model, open <b>Manage MLLM Services</b> and use the
+            <b>Reasoning Override</b> control</li>
         </ul>
         """
 

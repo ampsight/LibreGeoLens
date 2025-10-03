@@ -4,12 +4,14 @@ A QGIS plugin for experimenting with Multimodal Large Language Models (MLLMs) to
 
 ## Demo (click on the image)
 
+TODO: Update.
+
 [![Click to view demo](./resources/media/demo.png)](./resources/media/demo.gif)
 
 ## Key Features
 
-- Chat with an MLLM about georeferenced imagery.
-- Choose from different MLLM services and models.
+- Chat with MLLMs about georeferenced imagery.
+- Choose from 100s of different MLLM services and models, including custom OpenAI API compatible endpoints.
 - Work with local and/or remote imagery.
 - Draw areas to select and extract image chips to send to the MLLM.
 - Keep track of the chips and the interactions with the MLLM as GeoJSON features.
@@ -18,28 +20,39 @@ A QGIS plugin for experimenting with Multimodal Large Language Models (MLLMs) to
 
 ### QGIS Installation
 
-1. Navigate to the [QGIS Download Page](https://qgis.org/download/)
-2. Use the Online (OSGeo4W) Installer, "Express Install" when prompted
-3. Select https://download.osgeo.org when prompted for a download site
-4. When prompted with a checkbox list of four items to download, only QGIS (the first option) is necessary
+1. Navigate to the [QGIS Download Page](https://qgis.org/download/).
+2. Use the Online (OSGeo4W) Installer: `Express Install` when prompted is fine.
+3. Select https://download.osgeo.org when prompted for a download site.
+4. When prompted with a checkbox list of four items to download, only QGIS (the first option) is necessary.
+5. If you find QGIS font size too small (and thus LibreGeoLen's font size), you can configure it in `Settings` ->
+`Options` -> `General` -> `Application` -> `Font` -> `Size`. You'll need to restart QGIS for the changes to take effect.
 
 ### MLLM Services
 
-LibreGeoLens routes all model traffic through [LiteLLM](https://docs.litellm.ai/), unlocking many providers with a
-single integration. The dock now includes a `Manage Services` button that opens a configuration dialog where you can:
+LibreGeoLens now routes all model traffic through [LiteLLM](https://docs.litellm.ai/), unlocking many providers with a
+single integration. The plugin now includes a `Manage MLLM Services` button that opens a configuration dialog where you can:
 
 - Enable the built-in presets for OpenAI, Groq, Anthropic, and Google AI Studio by supplying API keys.
-- Register any LiteLLM provider by entering its provider name, API key, optional API base (for OpenAI-compatible endpoints like vLLM),
-  and whether streaming is supported.
-- Provide extra environment variables that should be applied before calling LiteLLM.
-- Set image input limits per service (either maximum MB or maximum pixel dimensions) to match each provider's expectations.
-- Add or remove vision-capable models for each service; the lists from previous versions are still respected and now live inside this dialog.
+- Register any LiteLLM provider (MLLM service) with `Add Service` by entering the name to display in the UI.
+- Then you can configure it with its [provider name](https://docs.litellm.ai/docs/providers), API key
+(can be fake if the service doesn't need one), optional API base (for OpenAI-compatible endpoints like vLLM),
+and whether streaming is supported.
+- Provide extra environment variables that should be passed as arguments to `litellm.completion`.
+- Set optional image input limits per service (either maximum MB or maximum pixel dimensions) to match each service expectations.
+- Add or remove models for each service; the lists from previous versions are still respected and now live inside this dialog.
+- Override LiteLLM's reasoning detection for each model (not recommended, but sometimes it's needed).
 
-Environment variables remain a valid fallback: if you leave an API key empty in `Manage Services`, LibreGeoLens will look
-for the expected system environment variables (e.g. `OPENAI_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`).
+Environment variables remain a valid fallback: if you leave an API key empty in `Manage MLLM Services`, LibreGeoLens will look
+for the expected system environment variables for the build-in presets (`OPENAI_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`).
 Configure them in QGIS via `Settings` -> `Options` -> `System` -> scroll down to `Environment`, toggle if needed,
 enable `Use custom variables` if needed, and add the variables you need. Restart QGIS after changing environment
 variables so the plugin receives the updated values.
+
+TODO: Example of adding an MLLM Service
+
+TODO: Example of adding a self-hosted MLLM Service (Ollama and vLLM).
+
+TODO: Move this out of prerequisites once Gemma3n is added.
 
 #### Conversation Summaries
 
@@ -48,6 +61,10 @@ The plugin always prefers a non-reasoning model from the configured providers fo
 model supports reasoning only, the summary request uses one of those models but forces the lowest reasoning effort to
 minimize extra latency and cost. You are encouraged to at least configure a provider that already has a non-reasoning model
 enabled by default, or add a non-reasoning model if not using any such providers.
+
+#### Known LiteLLM Issues
+
+TODO: Document gpt-5 and OpenRouter issues with reasoning outputs.
 
 ## Quickstart
 
@@ -180,6 +197,8 @@ The script will find all the COGs nested inside `--s3_directories` and create th
 - Click on `Export Chat` to generate a self-contained html displaying the chat, including the chips used and a `.geojson` subset with the chip features.
 - Click on `Open Logs Directory` to open the directory where the local logs are saved.
 - Click on `Help` for a quick usage guide.
+- Click on `Cancel` to stop the `Send to MLLM` request. If there is an ongoing streaming output, it will be interrupted.
+- For reasoning models, you can select the reasoning effort, and also toggle the reasoning output in the chat.
 - Additional optional settings  <img src="libre_geo_lens/resources/icons/settings_icon.png" width="20" height="20">:
     - `Default GeoJSON S3 Directory`: the default directory in S3 where the `.geojson` files will be searched for.
        You can modify the actual directory to be used every time you click on the `Load GeoJSON` button.
