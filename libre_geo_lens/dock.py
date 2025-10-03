@@ -364,15 +364,25 @@ class ManageServicesDialog(QDialog):
             self.service_list.addItem(item)
         self.service_list.blockSignals(False)
 
-        target_name = select_name or previous_service or (ordered_names[0] if ordered_names else None)
+        if select_name and select_name in ordered_names:
+            target_name = select_name
+        elif previous_service and previous_service in ordered_names:
+            target_name = previous_service
+        elif ordered_names:
+            target_name = ordered_names[0]
+        else:
+            target_name = None
+
         if target_name:
             for index in range(self.service_list.count()):
                 item = self.service_list.item(index)
                 if item.data(Qt.UserRole) == target_name:
                     self.service_list.setCurrentRow(index)
                     return
-        else:
-            self.current_service = None
+
+        self.service_list.setCurrentRow(-1)
+        self.current_service = None
+        self._set_detail_widgets_enabled(False)
 
     def refresh_status_labels(self):
         for index in range(self.service_list.count()):
@@ -672,6 +682,8 @@ class ManageServicesDialog(QDialog):
         self.working_added_models.pop(service_name, None)
         self.env_var_validation_issues.pop(service_name, None)
         self.working_reasoning_overrides.pop(service_name, None)
+        self.current_service = None
+        self._set_detail_widgets_enabled(False)
         self.update_service_list()
 
     def add_model(self):
