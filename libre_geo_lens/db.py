@@ -1,6 +1,7 @@
 import json
 import sqlite3
-import logging
+
+from .utils.logger import get_logger
 
 
 class LogsDB:
@@ -9,7 +10,7 @@ class LogsDB:
     
     def __init__(self, db_path):
         self.db_path = db_path
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__)
 
     def initialize_database(self):
         """Initialize the database or migrate it if necessary"""

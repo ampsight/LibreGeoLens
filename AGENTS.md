@@ -19,8 +19,11 @@ Do not try running any python commands. It won't work.
 ## Coding Style & Naming Conventions
 Use 4-space indentation and snake_case for functions and module-level names; keep Qt widget classes in PascalCase(see `dock.py`).
 
-## Commit & Pull Request Guidelines
+## Git Guidelines
 Do not make any git commit, push or PRs. The user will do so manually after testing your changes.
+
+You're running via WSL on Windows while the source code is directly on Windows because QGIS (which runs on Windows)
+needs to load it. Thus, commands like `git diff` are going to show all the file as changed when that's not true.
 
 ## Security & Configuration Tips
 Never commit API keys or AWS credentials, document required environment variables

@@ -26,6 +26,7 @@ import traceback
 from .settings import SettingsDialog
 from .db import LogsDB
 from .utils import raw_image_utils as ru
+from .utils.logger import get_logger
 from .custom_qt import (zoom_to_and_flash_feature, CustomTextBrowser, ImageDisplayWidget,
                         AreaDrawingTool, IdentifyDrawnAreaTool)
 
@@ -39,12 +40,13 @@ from qgis.PyQt.QtWidgets import (QSizePolicy, QFileDialog, QMessageBox, QInputDi
 from qgis.core import (QgsVectorLayer, QgsRasterLayer, QgsSymbol, QgsSimpleLineSymbolLayer, QgsUnitTypes,
                        QgsRectangle, QgsWkbTypes, QgsProject, QgsGeometry, QgsMapRendererParallelJob, QgsFeature,
                        QgsField, QgsVectorFileWriter, QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-                       QgsFeatureRequest, QgsLayerTreeLayer, QgsMessageLog)
+                       QgsFeatureRequest, QgsLayerTreeLayer)
+
+
+logger = get_logger(__name__)
 
 
 API_KEY_SENTINEL = "__LIBREGEOLENS_API_KEY__"
-# QgsMessageLog.logMessage("something", "LGL")
-
 
 class MLLMStreamWorker(QObject):
     chunk_received = pyqtSignal(object, object)
@@ -922,6 +924,7 @@ class ManageServicesDialog(QDialog):
         }
         self.accept()
 
+
 class LibreGeoLensDockWidget(QDockWidget):
     def __init__(self, iface, parent=None):
         super(LibreGeoLensDockWidget, self).__init__(parent)
@@ -954,6 +957,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         os.makedirs(self.logs_dir, exist_ok=True)
         self.logs_db = LogsDB(os.path.join(self.logs_dir, "logs.db"))
         self.logs_db.initialize_database()
+        logger.info("LibreGeoLens dock initialized; using logs directory %s", self.logs_dir)
 
         self.current_highlighted_button = None
         self.area_drawing_tool = None
@@ -1251,7 +1255,8 @@ class LibreGeoLensDockWidget(QDockWidget):
 
         self.api_selection = QComboBox()
         self.api_selection.currentIndexChanged.connect(self.on_api_selection_changed)
-        self.api_selection.setToolTip("Select the MLLM service provider (requires API key in QGIS settings)")
+        self.api_selection.setToolTip("Select the MLLM service provider "
+                                      "(requires API key in QGIS settings or in Manage MLLM Services)")
         api_model_layout.addWidget(self.api_selection)
 
         self.model_label = QLabel("MLLM Model:")
@@ -2506,7 +2511,7 @@ class LibreGeoLensDockWidget(QDockWidget):
 
         self.api_selection.setEnabled(True)
         self.model_selection.setEnabled(True)
-        for api_name in self.available_api_clients:
+        for api_name in sorted(list(self.available_api_clients.keys())):
             self.api_selection.addItem(api_name)
 
         del model_blocker
