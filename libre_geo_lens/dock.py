@@ -1204,7 +1204,10 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.update_reasoning_controls_state()
 
     def _has_active_stream(self):
-        return bool(self.active_streams)
+        if not self.active_streams:
+            return False
+        # Only treat streams that still need cleanup as active to avoid blocking UI actions post-cancel
+        return any(not ctx.get("ready_for_cleanup") for ctx in self.active_streams.values())
 
     def highlight_button(self, button):
         if self.current_highlighted_button:
