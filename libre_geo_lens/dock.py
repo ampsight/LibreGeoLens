@@ -78,11 +78,13 @@ class MLLMStreamWorker(QObject):
         try:
             if self.stream_supported:
                 try:
+                    QgsMessageLog.logMessage(str(self.base_kwargs), "LGL")
                     response_stream = litellm.completion(
                         model=self.model,
                         messages=self.messages,
                         stream=True,
-                        **self.base_kwargs
+                        **self.base_kwargs,
+                        allowed_openai_params=['reasoning_effort'] if 'reasoning_effort' in self.base_kwargs else []
                     )
                     if self._cancel_requested:
                         cancelled = True
@@ -141,7 +143,8 @@ class MLLMStreamWorker(QObject):
                     non_stream_response = litellm.completion(
                         model=self.model,
                         messages=self.messages,
-                        **self.base_kwargs
+                        **self.base_kwargs,
+                        allowed_openai_params=['reasoning_effort'] if 'reasoning_effort' in self.base_kwargs else []
                     )
                 except Exception as exc:
                     error_payload = {
@@ -184,9 +187,28 @@ class ManageServicesDialog(QDialog):
         self.working_added_models = copy.deepcopy(added_models or {})
         self.deduplicate_fn = deduplicate_fn
 
-        for name in self.templates.keys():
+        self.working_reasoning_overrides = {}
+        all_service_names = set(self.working_configurations.keys()) | set(self.templates.keys())
+        for name in all_service_names:
             self.working_configurations.setdefault(name, {})
             self.working_added_models.setdefault(name, [])
+            config = self.working_configurations[name]
+            overrides = config.get("reasoning_overrides")
+            if isinstance(overrides, dict):
+                cleaned = {
+                    str(model): state
+                    for model, state in overrides.items()
+                    if state in ("force_on", "force_off")
+                }
+            else:
+                cleaned = {}
+            self.working_reasoning_overrides[name] = cleaned
+            if cleaned:
+                config["reasoning_overrides"] = cleaned.copy()
+            else:
+                config.pop("reasoning_overrides", None)
+
+        self._syncing_reasoning_override_ui = False
 
         self.current_service = None
         self.result_configurations = None
@@ -282,6 +304,31 @@ class ManageServicesDialog(QDialog):
         self.models_list.currentItemChanged.connect(self.update_model_buttons)
         detail_panel.addWidget(self.models_list, 1)
 
+        override_layout = QHBoxLayout()
+        self.reasoning_override_label = QLabel("Reasoning Override:")
+        self.reasoning_override_combo = QComboBox()
+        self.reasoning_override_combo.addItem("Auto (use LiteLLM detection)", "auto")
+        self.reasoning_override_combo.addItem("Force reasoning support (use with caution)", "force_on")
+        self.reasoning_override_combo.addItem("Force disable reasoning support", "force_off")
+        self.reasoning_override_combo.currentIndexChanged.connect(self.on_reasoning_override_changed)
+        self.reasoning_override_combo.setToolTip(
+            "Override LiteLLM's reasoning support detection for the selected model."
+        )
+        override_layout.addWidget(self.reasoning_override_label)
+        override_layout.addWidget(self.reasoning_override_combo)
+        detail_panel.addLayout(override_layout)
+
+        self.reasoning_override_warning = QLabel(
+            "Warning: forcing reasoning support can cause API errors or unexpected behaviour if the model "
+            "does not truly support reasoning."
+        )
+        self.reasoning_override_warning.setWordWrap(True)
+        self.reasoning_override_warning.setStyleSheet("color: #b58900;")
+        detail_panel.addWidget(self.reasoning_override_warning)
+        self.reasoning_override_warning.setVisible(False)
+        self.reasoning_override_combo.setEnabled(False)
+        self.reasoning_override_label.setEnabled(False)
+
         model_button_layout = QHBoxLayout()
         self.add_model_button = QPushButton("Add Model")
         self.add_model_button.clicked.connect(self.add_model)
@@ -373,8 +420,13 @@ class ManageServicesDialog(QDialog):
         for widget in [self.provider_input, self.api_key_input, self.api_base_input,
                        self.streaming_checkbox, self.limit_mode_combo, self.image_mb_spin,
                        self.longest_px_spin, self.shortest_px_spin, self.env_vars_input,
-                       self.add_model_button, self.remove_model_button, self.models_list]:
+                       self.add_model_button, self.remove_model_button, self.models_list,
+                       self.reasoning_override_label, self.reasoning_override_combo,
+                       self.reasoning_override_warning]:
             widget.setEnabled(enabled)
+        if not enabled:
+            self.reasoning_override_warning.setVisible(False)
+        self._sync_reasoning_override_ui()
 
     def populate_service_form(self, service_name):
         template = self.templates.get(service_name, {})
@@ -445,23 +497,118 @@ class ManageServicesDialog(QDialog):
 
         for model in base_models:
             item = QListWidgetItem(model)
-            item.setData(Qt.UserRole, {"model": model, "removable": False})
-            item.setToolTip("Preset model from the plugin configuration")
+            base_tooltip = "Preset model from the plugin configuration"
+            item.setData(Qt.UserRole, {
+                "model": model,
+                "removable": False,
+                "base_tooltip": base_tooltip,
+            })
+            self._apply_reasoning_tooltip(item, service_name)
             self.models_list.addItem(item)
 
         for model in user_models:
             item = QListWidgetItem(model)
-            item.setData(Qt.UserRole, {"model": model, "removable": True})
-            item.setToolTip("User-added model")
+            base_tooltip = "User-added model"
+            item.setData(Qt.UserRole, {
+                "model": model,
+                "removable": True,
+                "base_tooltip": base_tooltip,
+            })
+            self._apply_reasoning_tooltip(item, service_name)
             self.models_list.addItem(item)
+
+        if service_name == self.current_service:
+            self._sync_reasoning_override_ui()
 
     def update_model_buttons(self):
         item = self.models_list.currentItem()
         if item is None:
             self.remove_model_button.setEnabled(False)
+            self._sync_reasoning_override_ui()
             return
         data = item.data(Qt.UserRole) or {}
         self.remove_model_button.setEnabled(bool(data.get("removable")))
+        self._sync_reasoning_override_ui()
+
+    @staticmethod
+    def _describe_reasoning_override(state):
+        if state == "force_on":
+            return "Manual override: force reasoning support"
+        if state == "force_off":
+            return "Manual override: disable reasoning support"
+        return None
+
+    def _apply_reasoning_tooltip(self, item, service_name):
+        if item is None:
+            return
+        data = item.data(Qt.UserRole) or {}
+        base_tooltip = data.get("base_tooltip")
+        if not base_tooltip:
+            base_tooltip = item.toolTip()
+        model_name = data.get("model")
+        overrides = self.working_reasoning_overrides.get(service_name, {}) if service_name else {}
+        description = self._describe_reasoning_override(overrides.get(model_name))
+        if description:
+            tooltip = f"{base_tooltip}\n{description}" if base_tooltip else description
+        else:
+            tooltip = base_tooltip
+        item.setToolTip(tooltip or "")
+
+    def _sync_reasoning_override_ui(self):
+        has_selection = bool(self.current_service and self.models_list.currentItem())
+        self.reasoning_override_label.setEnabled(has_selection)
+        self.reasoning_override_combo.setEnabled(has_selection)
+        if not has_selection:
+            self._syncing_reasoning_override_ui = True
+            with QSignalBlocker(self.reasoning_override_combo):
+                index = self.reasoning_override_combo.findData("auto")
+                if index != -1:
+                    self.reasoning_override_combo.setCurrentIndex(index)
+            self._syncing_reasoning_override_ui = False
+            self._update_reasoning_override_warning("auto")
+            return
+
+        item = self.models_list.currentItem()
+        data = item.data(Qt.UserRole) or {}
+        model_name = data.get("model")
+        overrides = self.working_reasoning_overrides.get(self.current_service, {})
+        state = overrides.get(model_name, "auto")
+        if state not in ("force_on", "force_off"):
+            state = "auto"
+
+        self._syncing_reasoning_override_ui = True
+        with QSignalBlocker(self.reasoning_override_combo):
+            index = self.reasoning_override_combo.findData(state)
+            if index != -1:
+                self.reasoning_override_combo.setCurrentIndex(index)
+        self._syncing_reasoning_override_ui = False
+
+        self._update_reasoning_override_warning(state)
+        self._apply_reasoning_tooltip(item, self.current_service)
+
+    def _update_reasoning_override_warning(self, state):
+        self.reasoning_override_warning.setVisible(state == "force_on")
+
+    def on_reasoning_override_changed(self):
+        if self._syncing_reasoning_override_ui or not self.current_service:
+            return
+        item = self.models_list.currentItem()
+        if item is None:
+            return
+        data = item.data(Qt.UserRole) or {}
+        model_name = data.get("model")
+        if not model_name:
+            return
+
+        state = self.reasoning_override_combo.currentData()
+        overrides = self.working_reasoning_overrides.setdefault(self.current_service, {})
+        if state == "auto":
+            overrides.pop(model_name, None)
+        else:
+            overrides[model_name] = state
+
+        self._apply_reasoning_tooltip(item, self.current_service)
+        self._update_reasoning_override_warning(state)
 
     def add_service(self):
         if self.current_service is not None:
@@ -485,6 +632,7 @@ class ManageServicesDialog(QDialog):
             "supports_streaming": True,
         }
         self.working_added_models.setdefault(name, [])
+        self.working_reasoning_overrides[name] = {}
         self.update_service_list(select_name=name)
 
     def remove_service(self):
@@ -509,6 +657,7 @@ class ManageServicesDialog(QDialog):
         self.working_configurations.pop(service_name, None)
         self.working_added_models.pop(service_name, None)
         self.env_var_validation_issues.pop(service_name, None)
+        self.working_reasoning_overrides.pop(service_name, None)
         self.update_service_list()
 
     def add_model(self):
@@ -567,6 +716,7 @@ class ManageServicesDialog(QDialog):
         models = self.working_added_models.setdefault(self.current_service, [])
         models.append(model_name)
         self.working_added_models[self.current_service] = self.deduplicate_fn(models)
+        self.working_reasoning_overrides.setdefault(self.current_service, {}).pop(model_name, None)
         self.populate_models_list(self.current_service)
         self.refresh_status_labels()
 
@@ -583,6 +733,7 @@ class ManageServicesDialog(QDialog):
         if model_name in models:
             models.remove(model_name)
             self.working_added_models[self.current_service] = self.deduplicate_fn(models)
+            self.working_reasoning_overrides.setdefault(self.current_service, {}).pop(model_name, None)
             self.populate_models_list(self.current_service)
 
     def persist_current_service(self):
@@ -645,6 +796,18 @@ class ManageServicesDialog(QDialog):
         else:
             config.pop("env_vars", None)
 
+        overrides = self.working_reasoning_overrides.get(self.current_service, {})
+        valid_overrides = {
+            model: state
+            for model, state in overrides.items()
+            if state in ("force_on", "force_off")
+        }
+        self.working_reasoning_overrides[self.current_service] = valid_overrides.copy()
+        if valid_overrides:
+            config["reasoning_overrides"] = valid_overrides
+        else:
+            config.pop("reasoning_overrides", None)
+
         if invalid_lines:
             self.env_var_validation_issues[self.current_service] = invalid_lines
         else:
@@ -672,6 +835,7 @@ class ManageServicesDialog(QDialog):
 
     def _collect_env_vars(self):
         env_text = self.env_vars_input.toPlainText()
+        QgsMessageLog.logMessage(env_text, "LGL")
         env_pairs = {}
         invalid_lines = []
         for raw_line in env_text.splitlines():
@@ -1496,7 +1660,7 @@ class LibreGeoLensDockWidget(QDockWidget):
             response_text = entry.get("response_stream") if entry.get("is_pending") else entry.get("response", "")
             response_text = response_text or ""
 
-            if litellm.supports_reasoning(entry['mllm_model']):
+            if self.supports_reasoning_for_model(entry.get('mllm_service'), entry.get('mllm_model')):
                 html_parts.append(
                     self._build_reasoning_section_html(entry, assistant_turn_start_text)
                 )
@@ -2207,6 +2371,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         entry.setdefault("limits", {})
         entry.setdefault("env_vars", [])
         entry.setdefault("supports_streaming", True)
+        entry.setdefault("reasoning_overrides", {})
         entry["user_defined"] = not bool(template)
 
         user_section = copy.deepcopy(user_config) if user_config else {}
@@ -2225,6 +2390,17 @@ class LibreGeoLensDockWidget(QDockWidget):
         if user_base_models:
             combined_models = self._deduplicate_preserve_order(base_models + user_base_models)
             entry["models"] = combined_models
+
+        overrides = user_section.get("reasoning_overrides")
+        if isinstance(overrides, dict):
+            cleaned_overrides = {
+                str(model): state
+                for model, state in overrides.items()
+                if state in ("force_on", "force_off")
+            }
+        else:
+            cleaned_overrides = {}
+        entry["reasoning_overrides"] = cleaned_overrides
 
         entry["user_config"] = user_section
         entry["provider_id"] = entry.get("litellm_params", {}).get("custom_llm_provider")
@@ -2400,6 +2576,33 @@ class LibreGeoLensDockWidget(QDockWidget):
             result.append(item)
         return result
 
+    def supports_reasoning_for_model(self, api_name, model_name):
+        if not model_name:
+            return False
+
+        override = None
+        if api_name:
+            config = self.service_configurations.get(api_name, {})
+            overrides = config.get("reasoning_overrides") if isinstance(config, dict) else None
+            if isinstance(overrides, dict):
+                override = overrides.get(model_name)
+
+            if override is None:
+                api_entry = getattr(self, "supported_api_clients", {}).get(api_name, {})
+                entry_overrides = api_entry.get("reasoning_overrides")
+                if isinstance(entry_overrides, dict):
+                    override = entry_overrides.get(model_name)
+
+        if override == "force_on":
+            return True
+        if override == "force_off":
+            return False
+
+        try:
+            return litellm.supports_reasoning(model=model_name)
+        except Exception:
+            return False
+
     @staticmethod
     def _split_assistant_content(content):
         text_parts = []
@@ -2536,9 +2739,36 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.update_reasoning_controls_state()
 
     def update_reasoning_controls_state(self):
-        supported = litellm.supports_reasoning(model=self.model_selection.currentText())
+        api_name = self.api_selection.currentText()
+        model_name = self.model_selection.currentText()
+        supported = self.supports_reasoning_for_model(api_name, model_name)
+        override_state = None
+        if api_name:
+            config = self.service_configurations.get(api_name, {})
+            overrides = config.get("reasoning_overrides") if isinstance(config, dict) else None
+            if isinstance(overrides, dict):
+                override_state = overrides.get(model_name)
+            if override_state is None:
+                client_entry = getattr(self, "supported_api_clients", {}).get(api_name, {})
+                entry_overrides = client_entry.get("reasoning_overrides")
+                if isinstance(entry_overrides, dict):
+                    override_state = entry_overrides.get(model_name)
+
         self.reasoning_effort_combo.setEnabled(supported)
         self.reasoning_effort_label.setEnabled(supported)
+
+        if override_state == "force_on":
+            tooltip = (
+                "Reasoning support is manually forced on for this model. Requests may fail if the model "
+                "does not actually support reasoning."
+            )
+        elif override_state == "force_off":
+            tooltip = "Reasoning support is manually disabled for this model."
+        else:
+            tooltip = "Select the amount of reasoning effort to request"
+
+        self.reasoning_effort_combo.setToolTip(tooltip)
+        self.reasoning_effort_label.setToolTip(tooltip)
 
     def _handle_stream_failure(self, entry, error):
         traceback_text = None
@@ -2569,8 +2799,9 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.render_chat_history()
         QApplication.processEvents()
 
-    def build_reasoning_params(self, model_name):
-        if not litellm.supports_reasoning(model=model_name):
+    def build_reasoning_params(self, model_name, api_name=None):
+        api_name = api_name or self.api_selection.currentText()
+        if not self.supports_reasoning_for_model(api_name, model_name):
             return {}
         params = {"reasoning_effort": self.reasoning_effort_combo.currentData()}
         return params
@@ -2587,7 +2818,7 @@ class LibreGeoLensDockWidget(QDockWidget):
             api_config = self.supported_api_clients.get(preferred_api, {})
             kwargs = dict(api_config.get("litellm_params", {}))
             kwargs.update(self.build_auth_params(api_config))
-            needs_reasoning = litellm.supports_reasoning(model=preferred_model)
+            needs_reasoning = self.supports_reasoning_for_model(preferred_api, preferred_model)
             return preferred_api, preferred_model, kwargs, needs_reasoning
 
         def build_base_kwargs(api_name):
@@ -2597,12 +2828,12 @@ class LibreGeoLensDockWidget(QDockWidget):
             return kwargs
 
         if preferred_api in available_clients:
-            if not litellm.supports_reasoning(model=preferred_model):
+            if not self.supports_reasoning_for_model(preferred_api, preferred_model):
                 kwargs = build_base_kwargs(preferred_api)
                 return preferred_api, preferred_model, kwargs, False
 
             for candidate in self._models_for_api(preferred_api):
-                if not litellm.supports_reasoning(model=candidate):
+                if not self.supports_reasoning_for_model(preferred_api, candidate):
                     kwargs = build_base_kwargs(preferred_api)
                     return preferred_api, candidate, kwargs, False
 
@@ -2610,7 +2841,7 @@ class LibreGeoLensDockWidget(QDockWidget):
             if api_name == preferred_api:
                 continue
             for candidate in self._models_for_api(api_name):
-                if not litellm.supports_reasoning(model=candidate):
+                if not self.supports_reasoning_for_model(api_name, candidate):
                     kwargs = build_base_kwargs(api_name)
                     return api_name, candidate, kwargs, False
 
@@ -2624,7 +2855,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         else:
             fallback_model = preferred_model
 
-        needs_reasoning = litellm.supports_reasoning(model=fallback_model)
+        needs_reasoning = self.supports_reasoning_for_model(fallback_api, fallback_model)
         return fallback_api, fallback_model, fallback_kwargs, needs_reasoning
 
     def delete_chat(self):
@@ -2753,7 +2984,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         auth_params = self.build_auth_params(api_config)
         base_completion_kwargs = dict(api_config.get("litellm_params", {}))
         base_completion_kwargs.update(auth_params)
-        reasoning_params = self.build_reasoning_params(selected_model)
+        reasoning_params = self.build_reasoning_params(selected_model, selected_api)
         base_completion_kwargs.update(reasoning_params)
 
         prompt = self.prompt_input.toPlainText()
@@ -2776,7 +3007,6 @@ class LibreGeoLensDockWidget(QDockWidget):
         else:
             user_message = {"role": "user", "content": [{"type": "text", "text": prompt}]}
             self.conversation.append(user_message)
-        QgsMessageLog.logMessage(self.conversation[-1]["content"][0]["text"], "LGL")
 
         n_images = len(self.image_display_widget.images)
         chip_ids_sequence, chip_modes_sequence = [], []
@@ -3359,7 +3589,8 @@ class LibreGeoLensDockWidget(QDockWidget):
                         f"Summarize the following in 10 words or less: {self.chat_history.toPlainText()}."
                         f" Only respond with your summary."}]}
                 ],
-                **summary_kwargs
+                **summary_kwargs,
+                allowed_openai_params=['reasoning_effort'] if 'reasoning_effort' in summary_kwargs else []
             )
             summary_text = self.extract_completion_text(summary_response).strip()
         except Exception as exc:
@@ -3509,6 +3740,9 @@ class LibreGeoLensDockWidget(QDockWidget):
             <li>For large areas, raw chip extraction can be resource intensive</li>
             <li>All chips are saved as GeoJSON features (orange rectangles) for easy reference</li>
             <li>Click the "i" button by the radio buttons for info about image size limits</li>
+            <li>If LiteLLM mislabels a reasoning-capable model, open <b>Manage MLLM Services</b> and use the
+            <b>Reasoning Override</b> control. Only force reasoning when you're sure—the provider may fail if the
+            model isn't built for reasoning.</li>
         </ul>
         """
 
