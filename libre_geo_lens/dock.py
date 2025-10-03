@@ -1117,10 +1117,11 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.info_button.clicked.connect(self.show_chip_info)
         
         radio_group_layout = QHBoxLayout()
+        radio_group_layout.addStretch(1)
         radio_group_layout.addWidget(self.radio_chip)
         radio_group_layout.addWidget(self.radio_raw)
         radio_group_layout.addWidget(self.info_button)
-        radio_group_layout.addStretch()
+        radio_group_layout.addStretch(1)
         main_content_layout.addLayout(radio_group_layout)
 
         self.image_display_widget = ImageDisplayWidget(canvas=self.canvas, log_layer=self.log_layer)
