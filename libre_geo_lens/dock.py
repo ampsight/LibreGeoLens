@@ -309,7 +309,7 @@ class ManageServicesDialog(QDialog):
         self.reasoning_override_combo = QComboBox()
         self.reasoning_override_combo.addItem("Auto (use LiteLLM detection)", "auto")
         self.reasoning_override_combo.addItem("Force reasoning support (use with caution)", "force_on")
-        self.reasoning_override_combo.addItem("Force disable reasoning support", "force_off")
+        self.reasoning_override_combo.addItem("Force disable reasoning support (use with caution)", "force_off")
         self.reasoning_override_combo.currentIndexChanged.connect(self.on_reasoning_override_changed)
         self.reasoning_override_combo.setToolTip(
             "Override LiteLLM's reasoning support detection for the selected model."
@@ -587,7 +587,21 @@ class ManageServicesDialog(QDialog):
         self._apply_reasoning_tooltip(item, self.current_service)
 
     def _update_reasoning_override_warning(self, state):
-        self.reasoning_override_warning.setVisible(state == "force_on")
+        if state == "force_on":
+            self.reasoning_override_warning.setText(
+                "Warning: forcing reasoning support can cause API errors or unexpected behaviour if the model "
+                "does not truly support reasoning."
+            )
+            self.reasoning_override_warning.setVisible(True)
+            return
+        if state == "force_off":
+            self.reasoning_override_warning.setText(
+                "Warning: forcing reasoning disable can lead to erros, missing features or degraded responses, and "
+                "reasoning-capable models may still perform hidden reasoning even if tokens are suppressed."
+            )
+            self.reasoning_override_warning.setVisible(True)
+            return
+        self.reasoning_override_warning.setVisible(False)
 
     def on_reasoning_override_changed(self):
         if self._syncing_reasoning_override_ui or not self.current_service:
