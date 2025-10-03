@@ -1247,7 +1247,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         api_model_layout.addWidget(self.api_label)
 
         self.api_selection = QComboBox()
-        self.api_selection.currentIndexChanged.connect(self.update_model_choices)
+        self.api_selection.currentIndexChanged.connect(self.on_api_selection_changed)
         self.api_selection.setToolTip("Select the MLLM service provider (requires API key in QGIS settings)")
         api_model_layout.addWidget(self.api_selection)
 
@@ -1256,7 +1256,7 @@ class LibreGeoLensDockWidget(QDockWidget):
         self.model_selection = QComboBox()
         self.model_selection.setToolTip("Select the specific multimodal model to use for analysis")
         api_model_layout.addWidget(self.model_selection)
-        self.model_selection.currentIndexChanged.connect(self.update_reasoning_controls_state)
+        self.model_selection.currentIndexChanged.connect(self.on_model_selection_changed)
 
         self.reasoning_effort_label = QLabel("Reasoning Effort:")
         self.reasoning_effort_label.setToolTip("Control the reasoning effort for supported models")
@@ -2486,23 +2486,30 @@ class LibreGeoLensDockWidget(QDockWidget):
             if not self.get_missing_env_vars(api_info):
                 self.available_api_clients[api_name] = api_info
 
-        self.api_selection.blockSignals(True)
+        api_blocker = QSignalBlocker(self.api_selection)
+        model_blocker = QSignalBlocker(self.model_selection)
         self.api_selection.clear()
+        self.model_selection.clear()
+
         if not self.available_api_clients:
             self.api_selection.addItem("No configured providers")
             self.api_selection.setEnabled(False)
-            self.model_selection.clear()
             self.model_selection.setEnabled(False)
-            self.api_selection.blockSignals(False)
+            del model_blocker
+            del api_blocker
+            self.update_reasoning_controls_state()
+            self.persist_mllm_selection()
             return
 
         self.api_selection.setEnabled(True)
         self.model_selection.setEnabled(True)
         for api_name in self.available_api_clients:
             self.api_selection.addItem(api_name)
-        self.api_selection.blockSignals(False)
-        self.update_model_choices()
-        self.update_reasoning_controls_state()
+
+        del model_blocker
+        del api_blocker
+
+        self.restore_last_mllm_selection()
 
     def get_missing_env_vars(self, api_config):
         missing = []
@@ -2545,6 +2552,74 @@ class LibreGeoLensDockWidget(QDockWidget):
             return []
 
         return [API_KEY_SENTINEL]
+
+    def load_last_mllm_selection(self):
+        settings = QSettings("Ampsight", "LibreGeoLens")
+        service = settings.value("last_mllm_service", "", type=str) or None
+        model = settings.value("last_mllm_model", "", type=str) or None
+        return service, model
+
+    def persist_mllm_selection(self):
+        settings = QSettings("Ampsight", "LibreGeoLens")
+
+        if not getattr(self, "available_api_clients", {}):
+            settings.remove("last_mllm_service")
+            settings.remove("last_mllm_model")
+            return
+
+        service = self.api_selection.currentText()
+        if not service or service not in self.available_api_clients:
+            settings.remove("last_mllm_service")
+            settings.remove("last_mllm_model")
+            return
+
+        settings.setValue("last_mllm_service", service)
+
+        model = self.model_selection.currentText()
+        valid_models = set(self._models_for_api(service))
+        if model and model in valid_models:
+            settings.setValue("last_mllm_model", model)
+        else:
+            settings.remove("last_mllm_model")
+
+    def restore_last_mllm_selection(self):
+        if not self.available_api_clients:
+            self.update_reasoning_controls_state()
+            self.persist_mllm_selection()
+            return
+
+        saved_service, saved_model = self.load_last_mllm_selection()
+
+        if saved_service in self.available_api_clients:
+            target_service = saved_service
+        else:
+            target_service = next(iter(self.available_api_clients.keys()))
+            saved_model = None
+
+        api_blocker = QSignalBlocker(self.api_selection)
+        index = self.api_selection.findText(target_service)
+        if index < 0 and self.api_selection.count():
+            index = 0
+        if index >= 0:
+            self.api_selection.setCurrentIndex(index)
+        del api_blocker
+
+        select_model = None
+        if saved_model:
+            valid_models = set(self._models_for_api(target_service))
+            if saved_model in valid_models:
+                select_model = saved_model
+
+        self.update_model_choices(select_model=select_model)
+        self.persist_mllm_selection()
+
+    def on_api_selection_changed(self, *_):
+        self.update_model_choices()
+        self.persist_mllm_selection()
+
+    def on_model_selection_changed(self, *_):
+        self.update_reasoning_controls_state()
+        self.persist_mllm_selection()
 
     @staticmethod
     def build_auth_params(api_config):
