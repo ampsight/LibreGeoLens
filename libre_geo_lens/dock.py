@@ -524,17 +524,45 @@ class ManageServicesDialog(QDialog):
             QMessageBox.information(self, "Model Exists", "That model is already listed for this provider.")
             return
 
+        vision_check_failed = False
+        vision_check_error = ""
         try:
             supports_vision = litellm.supports_vision(model=model_name)
-        except Exception:
-            supports_vision = False
-        # if not supports_vision:
-        #     QMessageBox.information(
-        #         self,
-        #         "Model Not Supported",
-        #         f"Model '{model_name}' does not exist or does not support vision. Please verify and try again."
-        #     )
-        #     return
+        except Exception as exc:
+            supports_vision = None
+            vision_check_failed = True
+            vision_check_error = str(exc).strip()
+
+        if supports_vision is False:
+            warning_text = (
+                f"""LiteLLM reports "{model_name}" does not support vision.\n\n"""
+                """You can add it anyway, but image requests may fail if the model truly lacks vision support."""
+            )
+            reply = QMessageBox.warning(
+                self,
+                "Vision Support Not Confirmed",
+                warning_text,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        elif vision_check_failed:
+            warning_lines = [
+                f"""LibreGeoLens could not verify whether "{model_name}" supports vision.\n\n""",
+                """You can continue, but image requests might fail if the model does not accept images.""",
+            ]
+            if vision_check_error:
+                warning_lines.append(f"Details: {vision_check_error}")
+            reply = QMessageBox.warning(
+                self,
+                "Vision Support Unknown",
+                "\n\n".join(warning_lines),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
 
         models = self.working_added_models.setdefault(self.current_service, [])
         models.append(model_name)
