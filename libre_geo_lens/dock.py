@@ -1014,6 +1014,9 @@ class LibreGeoLensDockWidget(QDockWidget):
         sidebar_layout.addWidget(self.open_logs_dir_button)
 
         self.chat_list = QListWidget()
+        self.chat_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.chat_list.setTextElideMode(Qt.ElideRight)
+        self.chat_list.setViewportMargins(0, 0, 0, 6)
         self.chat_list.itemClicked.connect(self.load_chat)
         self.chat_list.currentItemChanged.connect(self.on_current_item_changed)
         # self.chat_list.setToolTip("List of saved chat conversations - click to load a chat")
