@@ -43,6 +43,7 @@ from qgis.core import (QgsVectorLayer, QgsRasterLayer, QgsSymbol, QgsSimpleLineS
 
 
 API_KEY_SENTINEL = "__LIBREGEOLENS_API_KEY__"
+# QgsMessageLog.logMessage("something", "LGL")
 
 
 class MLLMStreamWorker(QObject):
@@ -78,7 +79,6 @@ class MLLMStreamWorker(QObject):
         try:
             if self.stream_supported:
                 try:
-                    QgsMessageLog.logMessage(str(self.base_kwargs), "LGL")
                     response_stream = litellm.completion(
                         model=self.model,
                         messages=self.messages,
@@ -835,7 +835,6 @@ class ManageServicesDialog(QDialog):
 
     def _collect_env_vars(self):
         env_text = self.env_vars_input.toPlainText()
-        QgsMessageLog.logMessage(env_text, "LGL")
         env_pairs = {}
         invalid_lines = []
         for raw_line in env_text.splitlines():
@@ -2546,6 +2545,66 @@ class LibreGeoLensDockWidget(QDockWidget):
                 params[param] = value
         return params
 
+    @staticmethod
+    def _parse_env_override_value(raw_value):
+        if raw_value is None or isinstance(raw_value, (bool, int, float)):
+            return raw_value
+
+        text = str(raw_value).strip()
+        if text == "":
+            return ""
+
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                return parser(text)
+            except Exception:
+                continue
+
+        return raw_value
+
+    def build_user_env_completion_kwargs(self, api_config):
+        api_config = api_config or {}
+        extras = {}
+        user_overrides = api_config.get("user_env_overrides") or {}
+        if not user_overrides:
+            return extras
+
+        defined_env_names = set()
+        for env_info in api_config.get("env_vars", []):
+            if isinstance(env_info, dict):
+                name = env_info.get("name")
+            else:
+                name = env_info
+            if name:
+                defined_env_names.add(name)
+
+        reserved_keys = set((api_config.get("litellm_params") or {}).keys())
+        reserved_keys.update({"api_key", "api_base"})
+
+        for key, raw_value in user_overrides.items():
+            if not key:
+                continue
+            if key in defined_env_names:
+                # Already consumed via build_auth_params / environment fallbacks
+                continue
+            if key in reserved_keys:
+                continue
+            if not any(char.islower() for char in key):
+                # Treat all-uppercase style entries purely as environment variables
+                continue
+
+            parsed_value = self._parse_env_override_value(raw_value)
+            extras[key] = parsed_value
+
+        return extras
+
+    def build_base_completion_kwargs(self, api_config):
+        api_config = api_config or {}
+        kwargs = dict(api_config.get("litellm_params", {}))
+        kwargs.update(self.build_auth_params(api_config))
+        kwargs.update(self.build_user_env_completion_kwargs(api_config))
+        return kwargs
+
     def open_manage_services_dialog(self):
         dialog = ManageServicesDialog(
             self.iface.mainWindow(),
@@ -2816,16 +2875,13 @@ class LibreGeoLensDockWidget(QDockWidget):
 
         if not available_clients:
             api_config = self.supported_api_clients.get(preferred_api, {})
-            kwargs = dict(api_config.get("litellm_params", {}))
-            kwargs.update(self.build_auth_params(api_config))
+            kwargs = self.build_base_completion_kwargs(api_config)
             needs_reasoning = self.supports_reasoning_for_model(preferred_api, preferred_model)
             return preferred_api, preferred_model, kwargs, needs_reasoning
 
         def build_base_kwargs(api_name):
             api_config = self.supported_api_clients.get(api_name, {})
-            kwargs = dict(api_config.get("litellm_params", {}))
-            kwargs.update(self.build_auth_params(api_config))
-            return kwargs
+            return self.build_base_completion_kwargs(api_config)
 
         if preferred_api in available_clients:
             if not self.supports_reasoning_for_model(preferred_api, preferred_model):
@@ -2981,9 +3037,7 @@ class LibreGeoLensDockWidget(QDockWidget):
                 )
             return
 
-        auth_params = self.build_auth_params(api_config)
-        base_completion_kwargs = dict(api_config.get("litellm_params", {}))
-        base_completion_kwargs.update(auth_params)
+        base_completion_kwargs = self.build_base_completion_kwargs(api_config)
         reasoning_params = self.build_reasoning_params(selected_model, selected_api)
         base_completion_kwargs.update(reasoning_params)
 
