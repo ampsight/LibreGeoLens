@@ -72,6 +72,7 @@ class MLLMStreamWorker(QObject):
         reasoning_text = ""
         stream_success = False
         stream_error = None
+        stream_error_traceback = None
         cancelled = False
 
         try:
@@ -111,9 +112,10 @@ class MLLMStreamWorker(QObject):
                         stream_success = True
                 except Exception as error:
                     stream_error = error
+                    stream_error_traceback = traceback.format_exc()
                     self.stream_failed.emit({
                         "error": error,
-                        "traceback": traceback.format_exc(),
+                        "traceback": stream_error_traceback,
                     })
 
             cancelled = cancelled or self._cancel_requested
@@ -129,6 +131,12 @@ class MLLMStreamWorker(QObject):
                 return
 
             if not stream_success:
+                if stream_error is not None:
+                    self.failed.emit({
+                        "stream_error": stream_error,
+                        "traceback": stream_error_traceback,
+                    })
+                    return
                 try:
                     non_stream_response = litellm.completion(
                         model=self.model,
@@ -896,19 +904,45 @@ class LibreGeoLensDockWidget(QDockWidget):
         main_content_layout.addWidget(self.image_display_widget, stretch=2)
 
         self.send_to_mllm_button = QPushButton("Send to MLLM")
-        self.send_to_mllm_button.setStyleSheet("background-color: #4CAF50; color: white; padding: 10px;")
+        button_style_template = (
+            "QPushButton {{"
+            "padding: 10px; font-weight: 600;"
+            "background-color: {enabled_color}; color: white;"
+            "}}"
+            "QPushButton:hover {{ background-color: {enabled_color}; }}"
+            "QPushButton:pressed {{ background-color: {pressed_color}; }}"
+            "QPushButton:disabled {{ background-color: {disabled_color}; color: #F2F2F2; }}"
+        )
+        self.send_to_mllm_button.setStyleSheet(
+            button_style_template.format(
+                enabled_color="#2E7D32",
+                pressed_color="#2E7D32",
+                disabled_color="#A5D6A7",
+            )
+        )
+        self.send_to_mllm_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.send_to_mllm_button.setMinimumHeight(42)
         self.send_to_mllm_button.clicked.connect(self.send_to_mllm_fn)
         self.send_to_mllm_button.setToolTip("Send your prompt and selected image chips to the Multimodal Large Language Model")
 
         send_button_row = QHBoxLayout()
-        send_button_row.addWidget(self.send_to_mllm_button)
+        send_button_row.setSpacing(12)
+        send_button_row.addWidget(self.send_to_mllm_button, stretch=1)
 
         self.cancel_mllm_button = QPushButton("Cancel")
         self.cancel_mllm_button.setEnabled(False)
         self.cancel_mllm_button.setToolTip("Cancel the current Send to MLLM request")
         self.cancel_mllm_button.clicked.connect(self.cancel_active_mllm_request)
-        send_button_row.addWidget(self.cancel_mllm_button)
-        send_button_row.addStretch()
+        self.cancel_mllm_button.setStyleSheet(
+            button_style_template.format(
+                enabled_color="#C62828",
+                pressed_color="#C62828",
+                disabled_color="#EF9A9A",
+            )
+        )
+        self.cancel_mllm_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.cancel_mllm_button.setMinimumHeight(42)
+        send_button_row.addWidget(self.cancel_mllm_button, stretch=1)
 
         main_content_layout.addLayout(send_button_row)
 
