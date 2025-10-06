@@ -18,6 +18,7 @@ Do not try running any python commands. It won't work.
 
 ## Coding Style & Naming Conventions
 Use 4-space indentation and snake_case for functions and module-level names; keep Qt widget classes in PascalCase(see `dock.py`).
+When making code changes, keep in mind that the plugin is meant to work cross-platform (Windows, MacOS, Unix).
 
 ## Git Guidelines
 Do not make any git commit, push or PRs. The user will do so manually after testing your changes.
