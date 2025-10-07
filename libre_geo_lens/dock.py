@@ -84,7 +84,9 @@ class MLLMStreamWorker(QObject):
                         messages=self.messages,
                         stream=True,
                         **self.base_kwargs,
-                        allowed_openai_params=['reasoning_effort'] if 'reasoning_effort' in self.base_kwargs else []
+                        # Tried allowed_openai_params to make reasoning work with OpenRouter but it doesn't
+                        # And it breaks reasoning with Anthropic if provided
+                        # allowed_openai_params=['reasoning_effort'] if 'reasoning_effort' in self.base_kwargs else []
                     )
                     if self._cancel_requested:
                         cancelled = True
@@ -144,7 +146,6 @@ class MLLMStreamWorker(QObject):
                         model=self.model,
                         messages=self.messages,
                         **self.base_kwargs,
-                        allowed_openai_params=['reasoning_effort'] if 'reasoning_effort' in self.base_kwargs else []
                     )
                 except Exception as exc:
                     error_payload = {
@@ -2959,7 +2960,7 @@ class LibreGeoLensDockWidget(QDockWidget):
             message = str(error).strip() or "Streaming failed."
 
         if traceback_text:
-            print(f"LibreGeoLens streaming error: {traceback_text}")
+            logger.error(f"LibreGeoLens streaming error: {traceback_text}")
 
         QMessageBox.information(
             self.iface.mainWindow(),
@@ -3112,7 +3113,8 @@ class LibreGeoLensDockWidget(QDockWidget):
         try:
             self.send_to_mllm()
         except Exception as e:
-            QMessageBox.warning(self.iface.mainWindow(), "Error", str(e))
+            if e is not None:
+                QMessageBox.warning(self.iface.mainWindow(), "Error", str(e))
             self.reload_current_chat()
 
     def send_to_mllm(self):
@@ -3505,9 +3507,9 @@ class LibreGeoLensDockWidget(QDockWidget):
         details = traceback_text or traceback.format_exc()
         if details:
             if context:
-                print(f"LibreGeoLens error in {context}:\n{details}")
+                logger.error(f"LibreGeoLens error in {context}:\n{details}")
             else:
-                print(f"LibreGeoLens error:\n{details}")
+                logger.error(f"LibreGeoLens error:\n{details}")
 
         if show_dialog:
             QMessageBox.critical(self.iface.mainWindow(), title, message)
@@ -3678,9 +3680,10 @@ class LibreGeoLensDockWidget(QDockWidget):
         )
 
         if traceback_text:
-            print(f"LibreGeoLens interaction error: {traceback_text}")
+            logger.error(f"LibreGeoLens interaction error: {traceback_text}")
 
-        QMessageBox.warning(self.iface.mainWindow(), "Error", message)
+        if message != "None":
+            QMessageBox.warning(self.iface.mainWindow(), "Error", message)
         if context is not None:
             context["handled_error"] = True
         self.reload_current_chat()
@@ -3758,11 +3761,10 @@ class LibreGeoLensDockWidget(QDockWidget):
                         f" Only respond with your summary."}]}
                 ],
                 **summary_kwargs,
-                allowed_openai_params=['reasoning_effort'] if 'reasoning_effort' in summary_kwargs else []
             )
             summary_text = self.extract_completion_text(summary_response).strip()
         except Exception as exc:
-            print(f"Failed to generate summary via {summary_api} ({summary_model}): {exc}")
+            logger.error(f"Failed to generate summary via {summary_api} ({summary_model}): {exc}")
 
         if summary_text:
             self.logs_db.update_chat_summary(self.current_chat_id, summary_text)
