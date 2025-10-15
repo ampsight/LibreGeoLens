@@ -5,7 +5,7 @@ to analyze remote sensing imagery.
 
 ## Demo
 
-TODO: Add video via GitHub UI.
+https://github.com/user-attachments/assets/3117c464-d049-4a6b-ae48-b22f37832121
 
 ## Key Features
 
