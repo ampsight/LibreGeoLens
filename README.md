@@ -3,11 +3,9 @@
 LibreGeoLens (LGL for short) is a QGIS plugin for experimenting with Multimodal Large Language Models (MLLMs)
 to analyze remote sensing imagery.
 
-## Demo (click on the image)
+## Demo
 
-TODO: Update.
-
-[![Click to view demo](./resources/media/demo.png)](./resources/media/demo.gif)
+TODO: Add video via GitHub UI.
 
 ## Key Features
 
@@ -31,7 +29,7 @@ TODO: Update.
 1. Go to `Plugins` > `Manage and Install Plugins...` -> `Settings` -> `Show also Experimental Plugins` -> `All` ->
    search for "LibreGeoLens", and click `Install Experimental Plugin`. Restart QGIS if needed.
 2. Optionally load a basemap layer. See [this](https://www.giscourse.com/quickmapservices-plugin-an-easy-way-to-add-basemaps-in-qgis/) for an example of one way to do it. Google Road is a nice one to start with.
-3. Click on the <img src="libre_geo_lens/resources/icons/icon.png" width="20" height="20"> icon on the top right to start 
+3. Click on the <img src="libre_geo_lens/resources/icons/icon.png" width="20" height="20"> icon on the top right to start
 the plugin, which will be docked to your right. If you get an error about external Python dependencies, try restarting QGIS,
 and if that does not solve the issue, you'll need to install them manually by following the
 [Troubleshooting Python Dependencies](#troubleshooting-python-dependencies) section.
