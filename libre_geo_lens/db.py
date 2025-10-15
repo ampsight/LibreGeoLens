@@ -1,15 +1,16 @@
 import json
 import sqlite3
-import logging
+
+from .utils.logger import get_logger
 
 
 class LogsDB:
     # Current database schema version
-    CURRENT_VERSION = 1
+    CURRENT_VERSION = 2
     
     def __init__(self, db_path):
         self.db_path = db_path
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__)
 
     def initialize_database(self):
         """Initialize the database or migrate it if necessary"""
@@ -84,7 +85,8 @@ class LogsDB:
                 mllm_model TEXT NOT NULL,
                 chips_mode_sequence TEXT NOT NULL,
                 chips_original_resolutions TEXT,
-                chips_actual_resolutions TEXT
+                chips_actual_resolutions TEXT,
+                reasoning_output TEXT
             )
         """)
 
@@ -154,6 +156,8 @@ class LogsDB:
             # Apply all necessary migrations in sequence
             if from_version < 1:
                 self._migrate_to_v1(conn, cursor)
+            if from_version < 2:
+                self._migrate_to_v2(conn, cursor)
             
             # Update schema version
             cursor.execute("UPDATE SchemaVersion SET version = ?", (self.CURRENT_VERSION,))
@@ -179,7 +183,20 @@ class LogsDB:
         if 'chips_actual_resolutions' not in columns:
             cursor.execute("ALTER TABLE Interactions ADD COLUMN chips_actual_resolutions TEXT")
             self.logger.info("Added chips_actual_resolutions column to Interactions table")
-        
+
+        conn.commit()
+
+    def _migrate_to_v2(self, conn, cursor):
+        """Migrate database to version 2"""
+        self.logger.info("Applying migration to version 2")
+
+        cursor.execute("PRAGMA table_info(Interactions)")
+        columns = {column[1] for column in cursor.fetchall()}
+
+        if 'reasoning_output' not in columns:
+            cursor.execute("ALTER TABLE Interactions ADD COLUMN reasoning_output TEXT")
+            self.logger.info("Added reasoning_output column to Interactions table")
+
         conn.commit()
 
     def save_chip(self, image_path, geocoords):
@@ -196,17 +213,20 @@ class LogsDB:
         conn.close()
         return chip_id
 
-    def save_interaction(self, text_input, text_output, chips_sequence, mllm_service, mllm_model, 
-                       chips_mode_sequence, chips_original_resolutions=None, chips_actual_resolutions=None):
+    def save_interaction(self, text_input, text_output, chips_sequence, mllm_service, mllm_model,
+                         chips_mode_sequence, chips_original_resolutions=None, chips_actual_resolutions=None,
+                         reasoning_output=None):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
         cursor.execute("""
-            INSERT INTO Interactions (text_input, text_output, chips_sequence, mllm_service, mllm_model, 
-                                     chips_mode_sequence, chips_original_resolutions, chips_actual_resolutions)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO Interactions (text_input, text_output, chips_sequence, mllm_service, mllm_model,
+                                     chips_mode_sequence, chips_original_resolutions, chips_actual_resolutions,
+                                     reasoning_output)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (text_input, text_output, str(chips_sequence), mllm_service, mllm_model, 
-              str(chips_mode_sequence), str(chips_original_resolutions), str(chips_actual_resolutions)))
+              str(chips_mode_sequence), str(chips_original_resolutions), str(chips_actual_resolutions),
+              reasoning_output))
 
         interaction_id = cursor.lastrowid
         conn.commit()

@@ -3,6 +3,11 @@ import os
 from PyQt5.QtCore import QSettings
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QFileDialog, QMessageBox
 
+from .utils.logger import configure_logging, get_logger
+
+
+logger = get_logger(__name__)
+
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -62,9 +67,16 @@ class SettingsDialog(QDialog):
     def save_settings(self):
         """Save settings to QSettings."""
         settings = QSettings("Ampsight", "LibreGeoLens")
+        previous_local_dir = settings.value("local_logs_directory", "")
         settings.setValue("default_s3_directory", self.s3_directory_input.text())
         settings.setValue("s3_logs_directory", self.s3_logs_directory_input.text())
         settings.setValue("local_logs_directory", self.local_logs_directory_input.text())
+        configure_logging()
+        if self.local_logs_directory_input.text() != previous_local_dir:
+            if self.local_logs_directory_input.text():
+                logger.info("Updated local logs directory to %s", self.local_logs_directory_input.text())
+            else:
+                logger.info("Cleared custom logs directory; using default location")
         QMessageBox.information(self, "Settings Saved", "Settings have been saved successfully!")
         self.accept()
 

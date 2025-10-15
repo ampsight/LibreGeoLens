@@ -5,6 +5,10 @@ from qgis.PyQt.QtWidgets import QAction, QFileDialog, QMessageBox
 from .resources import *
 from .dock import LibreGeoLensDockWidget
 from .settings import SettingsDialog
+from .utils.logger import get_logger
+
+
+logger = get_logger(__name__)
 
 
 class LibreGeoLens:
@@ -15,6 +19,7 @@ class LibreGeoLens:
         self.dock_widget = None
 
     def initGui(self):
+        logger.info("Registering LibreGeoLens actions in the QGIS GUI")
         self.add_action("Settings", ":/plugins/libre_geo_lens/resources/icons/settings_icon.png", self.open_settings)
         self.add_action("Run", ":/plugins/libre_geo_lens/resources/icons/icon.png", self.run)
 
@@ -37,6 +42,7 @@ class LibreGeoLens:
         settings_dialog.exec_()
 
     def run(self):
+        logger.info("Opening LibreGeoLens dock widget")
         if self.dock_widget is None:
             self.dock_widget = LibreGeoLensDockWidget(self.iface)
         self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
