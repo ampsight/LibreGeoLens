@@ -240,6 +240,16 @@ Double-click on `chat.html` to open it with your default browser.
     - `Local Logs Directory`: the local directory where you want to save your logs. You can use the `Browse` button for this one.
        If you don't set it, a new directory called `LibreGeoLensLogs` will be created in your home directory and the logs will be saved here.
 
+## Sharing Results
+
+With a chat selected, you can click on `Export Chat` to export into a self-contained folder that will be opened
+automatically. You can send this folder to whoever you want to share your results with, and they just need to
+double-click on `chat.html` to see the chat in their default browser.
+
+You can also use a service like [Netlify](https://app.netlify.com/drop) to host it in a website for free.
+Make sure you create an account for persistence and to remove the need for a password. Also make sure to rename
+`chat.html` to `index.html` before uploading the folder. See https://splendid-madeleine-6be67c.netlify.app for an example.
+
 ## Installation From Source (For Devs)
 
 1. Clone this repo.
