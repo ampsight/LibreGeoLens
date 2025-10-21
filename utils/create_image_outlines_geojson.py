@@ -7,6 +7,11 @@ import argparse
 from datetime import datetime
 from tqdm import tqdm
 import logging
+from botocore import UNSIGNED
+from botocore.client import Config
+from botocore.exceptions import ClientError, NoCredentialsError
+from rasterio.session import AWSSession
+
 logging.getLogger("botocore").setLevel(logging.WARNING)
 logging.basicConfig(
     level=logging.INFO,
@@ -14,6 +19,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def _have_aws_credentials() -> bool:
+    try:
+        sess = boto3.Session()
+        return sess.get_credentials() is not None
+    except Exception:
+        return False
 
 def parse_s3_path(s3_path):
     """ Parse S3 path into bucket and prefix. """
@@ -26,49 +37,84 @@ def parse_s3_path(s3_path):
 
 
 def list_files_in_s3_directory(s3_directory, file_extensions=None):
-    """ Recursively lists all files in the specified S3 directory and filters by extensions if provided. """
-    s3 = boto3.client("s3")
+    """Recursively list files in an S3 prefix and filter by extension.
+       - If creds are available, use signed requests.
+       - If not, use UNSIGNED (public) requests.
+       - If a single object path is provided, return it directly.
+       - If bucket denies ListBucket, log and continue.
+    """
     bucket, prefix = parse_s3_path(s3_directory)
-    paginator = s3.get_paginator("list_objects_v2")
-    page_iterator = paginator.paginate(Bucket=bucket, Prefix=prefix, RequestPayer='requester')
+
+    # If the "directory" is a specific file, just return it
+    if prefix and file_extensions and prefix.lower().endswith(tuple(file_extensions)):
+        return [f"s3://{bucket}/{prefix}"]
+
+    # Decide signed vs. unsigned automatically
+    session = boto3.Session()
+    region = os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
+    if _have_aws_credentials():
+        s3 = session.client("s3", region_name=region)
+    else:
+        s3 = session.client("s3", config=Config(signature_version=UNSIGNED), region_name=region)
 
     files = []
-    for page in page_iterator:
-        if "Contents" in page:
-            for obj in page["Contents"]:
+    paginator = s3.get_paginator("list_objects_v2")
+    try:
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
                 key = obj["Key"]
-                if not key.endswith("/") and (not file_extensions or any(key.endswith(ext) for ext in file_extensions)):
-                    full_path = f"s3://{bucket}/{key}"
-                    files.append(full_path)
-    return files
+                if key.endswith("/"):
+                    continue
+                if file_extensions and not any(key.lower().endswith(ext) for ext in file_extensions):
+                    continue
+                files.append(f"s3://{bucket}/{key}")
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code")
+        # Public buckets often block anonymous ListBucket; private buckets may block it too.
+        logger.warning(
+            f"Could not list '{s3_directory}' (Error: {code}). "
+            f"If you meant a single file, pass the full .tif key; "
+            f"otherwise ensure your IAM policy allows ListBucket for that prefix."
+        )
+    except NoCredentialsError:
+        # Should not happen because we choose UNSIGNED when no creds, but handle anyway.
+        logger.warning(
+            "No AWS credentials found for listing and UNSIGNED path failed. "
+            "Pass exact object keys or configure credentials."
+        )
 
+    return files
 
 def extract_geocoordinates_rasterio(file_path, target_crs="EPSG:4326"):
     try:
-        with rasterio.open(file_path) as src:
-            # Extract the corner coordinates
-            bounds = src.bounds
-            # Check the CRS of the GeoTIFF
-            crs = src.crs
-            if crs is None:
-                logger.error(f"The GeoTIFF {file_path} does not have a defined CRS. Skipping this file.")
-                return None
+        # If you have creds, use them via AWSSession. If not, open anonymously using AWS_NO_SIGN_REQUEST inside the Env.
+        if _have_aws_credentials():
+            aws = AWSSession(boto3.Session())  # picks up your configured credentials/profile
+            env_kwargs = {"session": aws}
+        else:
+            # Anonymous reads, but only within this context (no shell env var needed)
+            env_kwargs = {"AWS_NO_SIGN_REQUEST": "YES", "AWS_REGION": os.getenv("AWS_DEFAULT_REGION", "us-east-1")}
 
-            # Get the coordinates of the four corners
-            corners = [
-                (bounds.left, bounds.top),  # Top-left
-                (bounds.right, bounds.top),  # Top-right
-                (bounds.right, bounds.bottom),  # Bottom-right
-                (bounds.left, bounds.bottom),  # Bottom-left
-                (bounds.left, bounds.top)  # Close the polygon
-            ]
+        with rasterio.Env(**env_kwargs):
+            with rasterio.open(file_path) as src:
+                bounds = src.bounds
+                crs = src.crs
+                if crs is None:
+                    logger.error(f"The GeoTIFF {file_path} does not have a defined CRS. Skipping this file.")
+                    return None
 
-            # Reproject coordinates to the target CRS
-            x_coords, y_coords = zip(*corners)
-            x_reproj, y_reproj = transform(crs, target_crs, x_coords, y_coords)
-            corners_reproj = list(zip(x_reproj, y_reproj))
+                corners = [
+                    (bounds.left, bounds.top),     # TL
+                    (bounds.right, bounds.top),    # TR
+                    (bounds.right, bounds.bottom), # BR
+                    (bounds.left, bounds.bottom),  # BL
+                    (bounds.left, bounds.top)      # close
+                ]
 
-        return corners_reproj
+                x_coords, y_coords = zip(*corners)
+                x_reproj, y_reproj = transform(crs, target_crs, x_coords, y_coords)
+                return list(zip(x_reproj, y_reproj))
+
     except Exception as e:
         logger.error(f"An error occurred while processing {file_path}: {e}")
         return None
