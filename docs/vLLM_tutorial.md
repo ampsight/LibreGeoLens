@@ -1,32 +1,3 @@
-# Tutorial: Add a vLLM Backend to LibreGeoLens (QGIS)
-
-> **Purpose:** Run a multimodal LLM on an EC2 GPU with **vLLM** and plug it into LibreGeoLens via the OpenAI-compatible API.
-
----
-
-## 📦 Prerequisites
-- AWS account with permission to launch GPU instances
-- SSH key pair for EC2
-- QGIS + LibreGeoLens installed
-- A test image chip (PNG/JPG) accessible via URL (e.g., presigned S3 link)
-
----
-
-## 1) Set up an EC2 instance to run vLLM
-
-**Target instance (recommended):** `g5.xlarge` or `g6.xlarge`  
-**Storage:** `150 GiB` gp3  
-**AMI:** Ubuntu 22.04 (or AWS DLAMI with NVIDIA drivers)  
-**Security Group (inbound):**
-- `TCP 22` from **your_ip/32** (SSH)
-- `TCP 8000` from **your_ip/32** (vLLM API)
-
-**Launch & connect**
-```bash
-# from your machine
-ssh -i <path-to-key.pem> ubuntu@<EC2_PUBLIC_IP>
-
-````markdown
 # 🛰️ Tutorial: Adding a vLLM Backend to LibreGeoLens (QGIS)
 
 > **Goal:** Run a multimodal LLM on an EC2 GPU using **vLLM**, then connect it to **LibreGeoLens** for inference through the OpenAI-compatible API.
