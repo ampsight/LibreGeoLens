@@ -15,15 +15,15 @@ In this tutorial, we’ll:
 
 ## 1️⃣ Set Up the EC2 Instance
 
-### Instance Configuration
+### Suggested Instance Configuration
 | Setting | Recommended Value |
 |----------|------------------|
 | **Instance Type** | `g5.xlarge` (A10G GPU, 24 GB VRAM) |
 | **Storage** | 150 GiB gp3 |
-| **AMI** | Ubuntu 22.04 LTS (or Deep Learning AMI GPU PyTorch) |
+| **AMI** | Ubuntu 22.04 LTS or Deep Learning AMI GPU PyTorch |
 | **Inbound Rules** | TCP 22 (SSH), TCP 8000 (vLLM API) — both from your IP/32 |
 
-> 💡 Ensure the subnet routes to an Internet Gateway (for a public IP) and that the instance actually has a **Public IPv4 address**.
+> 💡 Ensure that the instance actually has a **Public IPv4 address**.
 
 ### SSH In and Install vLLM
 ```bash
@@ -38,18 +38,14 @@ pip install --upgrade pip "vllm>=0.5.0"
 
 ## 2️⃣ Pick and Deploy a Model
 
-> **Placeholder:** `***add a placeholder idk yet***`
-> Example non-China-origin multimodal models:
->
-> * `llava-hf/llava-v1.6-mistral-7b-hf`
-> * `llava-hf/llava-v1.6-llama3-8b-hf`
+**For this tutorial:** llava-hf/llava-v1.6-mistral-7b-hf
 
 > Optional: use an AWQ checkpoint if available and add `--quantization awq` for more headroom.
 
 ### Serve the Model with vLLM
 
 ```bash
-vllm serve <MODEL_ID> \
+vllm serve llava-hf/llava-v1.6-mistral-7b-hf \
   --host 0.0.0.0 --port 8000 \
   --dtype bfloat16 \
   --gpu-memory-utilization 0.92 \
