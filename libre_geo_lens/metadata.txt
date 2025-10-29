@@ -13,7 +13,7 @@ about=LibreGeoLens is an experimental QGIS plugin that integrates Multimodal Lar
  See a demo here: https://github.com/ampsight/LibreGeoLens?tab=readme-ov-file#demo
 
  After you install this plugin, you might get an error about external Python dependencies. Try restarting QGIS and if that does not solve the issue, you'll need to install them manually by following https://github.com/ampsight/LibreGeoLens?tab=readme-ov-file#troubleshooting-python-dependencies.
-version=0.6
+version=0.6.1
 author=Ampsight
 email=pedro.uria@ampsight.com
 
@@ -26,6 +26,9 @@ tracker=https://github.com/ampsight/LibreGeoLens/issues
 repository=https://github.com/ampsight/LibreGeoLens
 
 changelog=
+      0.6.1
+        * Fixed bug in some Windows machines when saving interactions with locally-loaded imagery chips as inputs
+        * Documentation improvements
       0.6
         * Added LiteLLM support, unlocking 100s of MLLM services and models
         * Added support for reasoning models

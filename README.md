@@ -24,6 +24,13 @@ https://github.com/user-attachments/assets/3117c464-d049-4a6b-ae48-b22f37832121
 5. If you find QGIS font size too small (and thus LibreGeoLen's font size), you can configure it in `Settings` ->
 `Options` -> `General` -> `Application` -> `Font` -> `Size`. You'll need to restart QGIS for the changes to take effect.
 
+Note: In Windows, if you didn't install QGIS with admin rights, some of the features of this plugin may fail.
+For example, you may not be able to stream COGs nor install the QMS plugin.
+Even so, you should be able to work with local imagery. Here are some images you can download and test the plugin with:
+- [Cincinnati](https://libre-geo-lens.s3.us-east-1.amazonaws.com/demo/imagery/COGS/NAIP/Ohio/Ohio_N/ortho_1-1_hn_s_oh061_2019_1.tif)
+- [St Louis](https://libre-geo-lens.s3.us-east-1.amazonaws.com/demo/imagery/COGS/Missouri/Stl_County.tif)
+- [Arizona](https://libre-geo-lens.s3.us-east-1.amazonaws.com/demo/imagery/COGS/NAIP/Arizona/Arizona_N/ortho_1-1_hn_s_az019_2019_1.tif)
+
 ## Quickstart
 
 1. Go to `Plugins` > `Manage and Install Plugins...` -> `Settings` -> `Show also Experimental Plugins` -> `All` ->
@@ -38,9 +45,12 @@ The quickest way is using one of the built-in presets (OpenAI, Anthropic, Google
 for which you just need to supply an API key: just click on `Manage MLLM Services`,
 select your service on the left, add your API key to `Provider API Key`, and hit `Save`.
 5. Click on the `Load GeoJSON` button, choose `Use Demo Resources` and click `Ok`.
+   1. If this fails, see the Note at the end of the [QGIS Installation](#qgis-installation) section above.
 6. You will see three red polygons over the US. Zoom into one of them, click on the `Draw Area to Stream COGs` button,
    and draw an area that intersects with one of them (click once on the map to start drawing and a second time to finish). 
    The COG will be displayed.
+   1. If you don't see the red polygons, right-click on the `Imagery Polygons` layer (usually on the bottom left of QGIS),
+   and click on `Zoom to Layer(s)`.
 7. Zoom into the image and find something you want to chat with the MLLM about.
 8. Click on the `Draw Area to Chip Imagery` button, draw the area the same way you did before,
    and you'll see the chip above the `Send to MLLM` button.

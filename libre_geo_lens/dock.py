@@ -3789,12 +3789,14 @@ class LibreGeoLensDockWidget(QDockWidget):
                 if reasoning_to_persist:
                     interaction_payload["reasoning"] = reasoning_to_persist
 
-                if len(interactions) > 0:
+                if interactions is not None and len(interactions) > 0:
                     interactions[interaction_id] = interaction_payload
                     self.log_layer.dataProvider().changeAttributeValues({
                         feature.id(): {0: json.dumps(interactions)}
                     })
                 else:
+                    if interactions is None:
+                        interactions = {}
                     interactions[interaction_id] = interaction_payload
                     image_metadata["chip_id"] = context["chip_ids_sequence"][idx]
                     self.log_layer.dataProvider().changeAttributeValues({
@@ -3883,6 +3885,10 @@ class LibreGeoLensDockWidget(QDockWidget):
                     <li>If you want to stream your own COGs, refer to the GitHub repo on how to do that</li>
                     <li>If you used <b>Load GeoJSON</b>, zoom into one of the red polygons, click <b>Draw Area
                      to Stream COGs</b>, and draw a rectangle over the red polygon to load the imagery</li>
+                     <ul>
+                        <li> If you you don't see the red polygons, right-click on the <b>Imagery Polygons</b> layer
+                        (usually on the bottom left of QGIS), and click on <b>Zoom to Layer(s)</b>. </li>
+                     </ul>
                 </ul>
             </li>
             <li><b>Extract an image chip</b>:
@@ -3919,6 +3925,14 @@ class LibreGeoLensDockWidget(QDockWidget):
             try it out with an image</li>
             <li>If LiteLLM mislabels whether a model is a reasoning model, open <b>Manage MLLM Services</b> and use the
             <b>Reasoning Override</b> control</li>
+        </ul>
+        Note: In Windows, if you didn't install QGIS with admin rights, some of the features of this plugin may fail.
+        For example, you may not be able to stream COGs nor install the QMS plugin.
+        Even so, you should be able to work with local imagery. Here are some images you can download and test the plugin with:
+        <ul>
+            <li> <a href="https://libre-geo-lens.s3.us-east-1.amazonaws.com/demo/imagery/COGS/NAIP/Ohio/Ohio_N/ortho_1-1_hn_s_oh061_2019_1.tif">Cincinnati</a></li>
+            <li> <a href="https://libre-geo-lens.s3.us-east-1.amazonaws.com/demo/imagery/COGS/Missouri/Stl_County.tif">St Louis</a></li>
+            <li> <a href="https://libre-geo-lens.s3.us-east-1.amazonaws.com/demo/imagery/COGS/NAIP/Arizona/Arizona_N/ortho_1-1_hn_s_az019_2019_1.tif">Arizona</a></li>
         </ul>
         """
 
