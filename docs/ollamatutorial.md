@@ -1,6 +1,6 @@
 # 🧠 Tutorial: Adding an Ollama Backend to LibreGeoLens (QGIS)
 
-> **Goal:** Run a multimodal LLM locally using **Ollama**, then connect it to **LibreGeoLens** through the OpenAI-compatible API for offline or private inference.
+> **Goal:** Run a multimodal LLM locally using **Ollama**, connecting it to **LibreGeoLens** through the OpenAI-compatible API for offline or private inference.
 
 ---
 
@@ -34,7 +34,7 @@ Download and install from:
 ollama serve
 ```
 
-By default, Ollama listens on `http://localhost:11434`.
+By default, Ollama listens on `http://localhost:11434`. If the above command either runs or throws an error stating that only one usage of each socket address is normally permitted, then you can proceed below. The error simply means that ollama began listening upon installation.
 
 ---
 
@@ -47,7 +47,7 @@ Choose a lightweight multimodal one for fast inference.
 
 | Model             | Description                                    | Approx. VRAM / RAM |
 | ----------------- | ---------------------------------------------- | ------------------ |
-| `moondream`       | Very lightweight VLM designed for edge devices | < 8 GB             |
+| `moondream:latest`       | Very lightweight VLM designed for edge devices | < 8 GB             |
 | `llava:7b`        | LLaVA 7B, solid performance on single GPU      | ~16 GB             |
 | `llava-phi3`      | Smaller variant using Phi-3 backend            | ~8 GB              |
 | `llava-llama3:8b` | LLaVA built on Llama-3                         | ~18 GB             |
@@ -59,17 +59,6 @@ ollama pull moondream
 # or another model, e.g.
 # ollama pull llava:7b
 ```
-
-### Test Locally
-
-```bash
-ollama run moondream
-> /set image /path/to/your/image.png
-> Describe this image.
-```
-
-✅ You should see a short description returned.
-If that works, the local API is ready for LibreGeoLens.
 
 ---
 
@@ -83,37 +72,14 @@ Open **QGIS → LibreGeoLens → Manage MLLM Services → Add Service** and fill
 | **Provider Name**      | `openai`                        |
 | **Provider API Key**   | *(blank or any dummy value)*    |
 | **API Base**           | `http://127.0.0.1:11434/v1`     |
-| **Supports Streaming** | ✅                               |
-| **Models**             | e.g., `moondream` or `llava:7b` |
+| **Supports Streaming** | ✅                             |
+| **Models**             | `moondream:latest`              |
 
 > ⚠️ The `/v1` at the end of **API Base** is important — it makes Ollama behave as an OpenAI-compatible endpoint for the plugin.
 
 ---
 
 ## 4️⃣ Test the Integration
-
-### A. Direct API Test
-
-Run this from a terminal (while Ollama is running):
-
-```bash
-curl http://127.0.0.1:11434/v1/chat/completions \
- -H "Content-Type: application/json" \
- -d '{
-  "model":"moondream",
-  "messages":[{"role":"user","content":[
-    {"type":"text","text":"Describe the contents of this image."},
-    {"type":"image_url","image_url":{"url":"file:///absolute/path/to/image.png"}}
-  ]}],
-  "max_tokens":128
- }'
-```
-
-If you get a textual description, the API is functioning.
-
----
-
-### B. LibreGeoLens Test
 
 1. In QGIS, open LibreGeoLens and choose **Ollama (Local)**.
 2. Pick your model (e.g., `moondream`).
@@ -135,21 +101,6 @@ If you get a textual description, the API is functioning.
 
 ---
 
-## 🧱 Optional: Advanced Setup for Shared Machines
-
-If you need a shared demo environment:
-
-* Run Ollama on a small **EC2 g5 instance** instead of locally
-* Use `--host 0.0.0.0` when starting the service:
-
-  ```bash
-  OLLAMA_HOST=0.0.0.0 ollama serve
-  ```
-* Open port **11434/tcp** to your workshop IPs
-* Connect using `http://<EC2_PUBLIC_IP>:11434/v1` in LibreGeoLens
-
----
-
 ## 🔒 Security & Performance Tips
 
 * Keep images small for quick responses (≤ 1 MP recommended)
@@ -159,22 +110,6 @@ If you need a shared demo environment:
 
 ---
 
-## 📝 Fill-In Summary
-
-| Item                      | Your Entry                   |
-| ------------------------- | ---------------------------- |
-| **Host Machine / EC2 IP** | `__________________________` |
-| **Model ID**              | `__________________________` |
-| **API Base**              | `http://127.0.0.1:11434/v1`  |
-| **Chip / Image Path**     | `__________________________` |
-| **Result Notes**          | `__________________________` |
-
----
-
 **✅ Done!**
 You’ve successfully connected **Ollama** to **LibreGeoLens**.
 You can now run multimodal LLMs like *moondream* or *LLaVA* entirely on your own hardware — no external API required.
-
-```
----
-```
