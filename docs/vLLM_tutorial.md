@@ -52,6 +52,12 @@ vllm serve llava-hf/llava-v1.6-mistral-7b-hf \
   --max-model-len 4096
 ```
 
+If you run into a "command not found" error, vllm may not have landed in your PATH. Easy fix:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 ### Sanity Check
 
 ```bash
