@@ -133,9 +133,12 @@ Any OpenAI API compatible endpoint can be added by using `openai` as `Provider N
 at the end of `API Base`. Both Ollama and vLLM (and many others) can be used this way. For example, if you have a vLLM
 endpoint running on a cloud instance, `API Base` would be "http://<your_instance_public_ip>:8000/v1".
 
-Here's another example of configuring Ollama x OpenAI API compatible running on the same machine as LGL:
+Here's an example of configuring Ollama x OpenAI API compatible running on the same machine as LGL:
 
 <img src="resources/media/Ollama_local_openai_config_example.png" width="600">
+
+See the [docs](docs) folder for tutorials on how to run [Ollama](docs/ollamatutorial.md) on your local machine,
+[vLLM](docs/vLLM_tutorial.md) on an EC2 instance, and connect them to LGL via the `openai` route.
 
 ### Conversation Summaries
 
@@ -259,6 +262,11 @@ double-click on `chat.html` to see the chat in their default browser.
 You can also use a service like [Netlify](https://app.netlify.com/drop) to host it in a website for free.
 Make sure you create an account for persistence and to remove the need for a password. Also make sure to rename
 `chat.html` to `index.html` before uploading the folder. See https://splendid-madeleine-6be67c.netlify.app for an example.
+
+## FOSS4G NA 2025 Workshop
+
+See [here](docs/FOSS4G_NA_2025_Workshop/foss4g_na_2025_lgl_workshop_agenda.pdf) and
+[here](docs/FOSS4G_NA_2025_Workshop/foss4g_na_2025_lgl_workshop_mllms.pdf).
 
 ## Installation From Source (For Devs)
 
