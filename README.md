@@ -20,7 +20,7 @@ https://github.com/user-attachments/assets/3117c464-d049-4a6b-ae48-b22f37832121
 1. Navigate to the [QGIS Download Page](https://qgis.org/download/).
 2. Use the Online (OSGeo4W) Installer: `Express Install` when prompted is fine.
 3. Select https://download.osgeo.org when prompted for a download site.
-4. When prompted with a checkbox list of four items to download, only QGIS (the first option) is necessary.
+4. When prompted with a checkbox list of four items to download, only QGIS (the first option) is necessary. LGL needs QGIS 3.30 or higher.
 5. If you find QGIS font size too small (and thus LibreGeoLen's font size), you can configure it in `Settings` ->
 `Options` -> `General` -> `Application` -> `Font` -> `Size`. You'll need to restart QGIS for the changes to take effect.
 
@@ -34,27 +34,28 @@ Even so, you should be able to work with local imagery. Here are some images you
 ## Quickstart
 
 1. Go to `Plugins` > `Manage and Install Plugins...` -> `Settings` -> `Show also Experimental Plugins` -> `All` ->
-   search for "LibreGeoLens", and click `Install Experimental Plugin`. Restart QGIS if needed.
-2. Optionally load a basemap layer. See [this](https://www.giscourse.com/quickmapservices-plugin-an-easy-way-to-add-basemaps-in-qgis/) for an example of one way to do it. Google Road is a nice one to start with.
-3. Click on the <img src="libre_geo_lens/resources/icons/icon.png" width="20" height="20"> icon on the top right to start
+   search for "LibreGeoLens", and click `Install Experimental Plugin`. It might take a few minutes for the Python dependencies to install. Afterwards, you might see an error saying "Please restart QGIS". If so,
+   please restart, and then go back to `Plugins` > `Manage and Install Plugins...` -> `Installed` -> click on the checkbox for LibreGeoLens if it's unchecked. If it's checked you should be good to go.
+3. Optionally load a basemap layer. See [this](https://www.giscourse.com/quickmapservices-plugin-an-easy-way-to-add-basemaps-in-qgis/) for an example of one way to do it. Google Road is a nice one to start with.
+4. Either click on `Plugins` -> `LibreGeoLens` -> `Run`, or directly click on the <img src="libre_geo_lens/resources/icons/icon.png" width="20" height="20"> icon to the upper right of QGIS to start
 the plugin, which will be docked to your right. If you get an error about external Python dependencies, try restarting QGIS,
 and if that does not solve the issue, you'll need to install them manually by following the
 [Troubleshooting Python Dependencies](#troubleshooting-python-dependencies) section.
-4. Configure an MLLM service as explained in the [MLLM Services](#mllm-services) section.
+5. Configure an MLLM service as explained in the [MLLM Services](#mllm-services) section.
 The quickest way is using one of the built-in presets (OpenAI, Anthropic, Google AI Studio or Groq)
 for which you just need to supply an API key: just click on `Manage MLLM Services`,
 select your service on the left, add your API key to `Provider API Key`, and hit `Save`.
-5. Click on the `Load GeoJSON` button, choose `Use Demo Resources` and click `Ok`.
+6. Click on the `Load GeoJSON` button, choose `Use Demo Resources` and click `Ok`.
    1. If this fails, see the Note at the end of the [QGIS Installation](#qgis-installation) section above.
-6. You will see three red polygons over the US. Zoom into one of them, click on the `Draw Area to Stream COGs` button,
+7. You will see three red polygons over the US. Zoom into one of them, click on the `Draw Area to Stream COGs` button,
    and draw an area that intersects with one of them (click once on the map to start drawing and a second time to finish). 
    The COG will be displayed.
    1. If you don't see the red polygons, right-click on the `Imagery Polygons` layer (usually on the bottom left of QGIS),
    and click on `Zoom to Layer(s)`.
-7. Zoom into the image and find something you want to chat with the MLLM about.
-8. Click on the `Draw Area to Chip Imagery` button, draw the area the same way you did before,
+8. Zoom into the image and find something you want to chat with the MLLM about.
+9. Click on the `Draw Area to Chip Imagery` button, draw the area the same way you did before,
    and you'll see the chip above the `Send to MLLM` button.
-9. Type a prompt and click on the `Send to MLLM` button to start a conversation.
+10. Type a prompt and click on the `Send to MLLM` button to start a conversation.
 
 ## MLLM Services
 
@@ -341,6 +342,13 @@ sys.executable
 ```
 
 and then try to find the Python you need to use. In the example above, it was `/Applications/QGIS-LTR.app/Contents/MacOS/bin/python3`.
+
+## Other Troubleshooting
+
+- If you are using a corporate laptop with some sort of restrictions, you might get SSL errors when sending a prompt to a MLLM. There's
+not much (if at all) that you can probably do yourself to fix this. You should contact your IT department about it.
+- The "Logs" and "Imagery Polygons" layers are created and managed by LGL. If you edit / remove them, you'll probably
+encounter issues. Moving them around should be ok.
 
 ## Publishing (for Vibrint employees)
 
